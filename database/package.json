@@ -1,0 +1,40 @@
+{
+  "name": "@skillgap/database",
+  "version": "1.0.0",
+  "description": "PostgreSQL and Prisma persistence layer for SkillGap AI",
+  "main": "dist/index.js",
+  "scripts": {
+    "db:start": "tsx scripts/start_db.ts",
+    "db:stop": "tsx scripts/stop_db.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init_skillgap_schema",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:seed": "prisma db seed",
+    "prisma:studio": "prisma studio",
+    "db:validate": "tsx scripts/validate_db.ts",
+    "test": "tsx tests/run_tests.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "keywords": [
+    "prisma",
+    "postgresql",
+    "skillgap"
+  ],
+  "author": "SkillGap AI Team",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "dotenv": "^16.4.7",
+    "embedded-postgres": "16.14.0-beta.17",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/pg": "^8.11.10",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

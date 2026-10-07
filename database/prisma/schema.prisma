@@ -1,0 +1,206 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CANDIDATE
+  RECRUITER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum ResumeStatus {
+  UPLOADED
+  PROCESSING
+  PROCESSED
+  FAILED
+  ARCHIVED
+}
+
+model User {
+  id                String             @id @default(uuid())
+  email             String             @unique
+  passwordHash      String
+  displayName       String
+  role              UserRole           @default(CANDIDATE)
+  status            UserStatus         @default(ACTIVE)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  lastLoginAt       DateTime?
+  deletedAt         DateTime?
+  resumes           Resume[]
+  candidateProfiles CandidateProfile[]
+
+  @@map("users")
+}
+
+model Resume {
+  id                String             @id @default(uuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  originalFilename  String
+  storedFilename    String
+  mimeType          String
+  fileSize          Int
+  status            ResumeStatus       @default(UPLOADED)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  deletedAt         DateTime?
+  candidateProfiles CandidateProfile[]
+
+  @@index([userId])
+  @@map("resumes")
+}
+
+model CandidateProfile {
+  id              String           @id @default(uuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  resumeId        String?
+  resume          Resume?          @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  summary         String?          @db.Text
+  analysisVersion String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  candidateSkills CandidateSkill[]
+  matches         Match[]
+
+  @@index([userId])
+  @@map("candidate_profiles")
+}
+
+model Skill {
+  id              String           @id @default(uuid())
+  name            String
+  normalizedName  String           @unique
+  category        String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  candidateSkills CandidateSkill[]
+  jobSkills       JobSkill[]
+  skillGaps       SkillGap[]
+  careerPaths     CareerPath[]
+
+  @@index([category])
+  @@map("skills")
+}
+
+model CandidateSkill {
+  id                 String           @id @default(uuid())
+  candidateProfileId String
+  candidateProfile   CandidateProfile @relation(fields: [candidateProfileId], references: [id], onDelete: Cascade)
+  skillId            String
+  skill              Skill            @relation(fields: [skillId], references: [id], onDelete: Restrict)
+  confidence         Float            // 0.0 - 1.0 confidence score (confidence != proficiency)
+  evidence           String?          @db.Text
+  sourceSection      String?
+  createdAt          DateTime         @default(now())
+
+  @@unique([candidateProfileId, skillId])
+  @@index([candidateProfileId])
+  @@index([skillId])
+  @@map("candidate_skills")
+}
+
+model Job {
+  id                 String       @id // Stable deterministic ID from Analytics Jobs preprocessing (e.g. job_000000)
+  externalRef        String?
+  title              String
+  normalizedTitle    String
+  jobType            String?
+  location           String?
+  description        String?      @db.Text
+  salaryRaw          String?
+  minExperienceYears Float?
+  maxExperienceYears Float?
+  source             String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  jobSkills          JobSkill[]
+  matches            Match[]
+  careerPaths        CareerPath[]
+
+  @@index([normalizedTitle])
+  @@map("jobs")
+}
+
+model JobSkill {
+  id         String   @id @default(uuid())
+  jobId      String
+  job        Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  skillId    String
+  skill      Skill    @relation(fields: [skillId], references: [id], onDelete: Restrict)
+  importance Float?
+  isRequired Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([jobId, skillId])
+  @@index([jobId])
+  @@index([skillId])
+  @@map("job_skills")
+}
+
+model Match {
+  id                 String           @id @default(uuid())
+  candidateProfileId String
+  candidateProfile   CandidateProfile @relation(fields: [candidateProfileId], references: [id], onDelete: Cascade)
+  jobId              String
+  job                Job              @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  finalScore         Float            // 0 - 100 overall score
+  skillOverlapScore  Float            // 0.0 - 1.0 normalized overlap
+  tfidfSimilarity    Float            // 0.0 - 1.0 TF-IDF component
+  semanticSimilarity Float            // 0.0 - 1.0 semantic embedding similarity
+  matchingVersion    String
+  explanation        Json?            // Explainability snapshot: matchedSkills, missingSkills, model versions
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  skillGaps          SkillGap[]
+
+  @@index([candidateProfileId])
+  @@index([jobId])
+  @@map("matches")
+}
+
+model SkillGap {
+  id        String   @id @default(uuid())
+  matchId   String
+  match     Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  skillId   String
+  skill     Skill    @relation(fields: [skillId], references: [id], onDelete: Restrict)
+  priority  String?
+  reason    String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([matchId])
+  @@index([skillId])
+  @@map("skill_gaps")
+}
+
+model CareerPath {
+  id                 String   @id @default(uuid())
+  targetRole         String?
+  jobId              String?
+  job                Job?     @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  title              String
+  description        String?  @db.Text
+  sequenceOrder      Int
+  recommendedSkillId String?
+  recommendedSkill   Skill?   @relation(fields: [recommendedSkillId], references: [id], onDelete: SetNull)
+  projectSuggestion  String?  @db.Text
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([jobId])
+  @@index([recommendedSkillId])
+  @@map("career_paths")
+}

@@ -32,6 +32,8 @@ uploads/*
 *.sqlite
 *.sqlite3
 *.db
+.pgdata/
+database/.pgdata/
 
 # Logs
 *.log
