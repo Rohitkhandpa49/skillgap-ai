@@ -53,3 +53,8 @@ Thumbs.db
 # Temporary Files
 *.tmp
 *.temp
+# ORGANIZER-PROVIDED DATASETS
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
