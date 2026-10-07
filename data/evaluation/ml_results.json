@@ -1,0 +1,50 @@
+[
+  {
+    "accuracy": 0.8857,
+    "precision": 0.875,
+    "recall": 0.875,
+    "f1": 0.875,
+    "confusion_matrix": [
+      [
+        17,
+        2
+      ],
+      [
+        2,
+        14
+      ]
+    ],
+    "dataset": "Technical Skills \u2192 Salary Hike",
+    "features": [
+      "big_data_skills",
+      "maths-stats_skills",
+      "coding_skills",
+      "ai_and_ml_skills",
+      "dashboard_and_storytelling_skills"
+    ]
+  },
+  {
+    "accuracy": 0.9268,
+    "precision": 0.963,
+    "recall": 0.9286,
+    "f1": 0.9455,
+    "confusion_matrix": [
+      [
+        12,
+        1
+      ],
+      [
+        2,
+        26
+      ]
+    ],
+    "dataset": "Personality \u2192 Success",
+    "features": [
+      "neuroticism",
+      "extraversion",
+      "openness_to_experience",
+      "agreeableness",
+      "conscientiousness"
+    ]
+  }
+]
