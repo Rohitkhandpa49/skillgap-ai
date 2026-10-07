@@ -1,0 +1,108 @@
+{
+  "model_name": "SVM (RBF)",
+  "model_type": "SVC",
+  "model_version": "1.0.0",
+  "dataset_name": "SDS Personality Traits.xlsx",
+  "target_column": "success_classification_high_low",
+  "expected_features": [
+    "neuroticism",
+    "extraversion",
+    "openness_to_experience",
+    "agreeableness",
+    "conscientiousness"
+  ],
+  "trained_timestamp_utc": "2026-10-07T10:29:12.427507+00:00",
+  "random_state": 42,
+  "features_scaled": true,
+  "preprocessing_artifacts": {
+    "scaler": "models/preprocessing/sds_standard_scaler.joblib"
+  },
+  "cross_validation_metrics": {
+    "Logistic Regression": {
+      "accuracy": {
+        "mean": 0.9215384615384616,
+        "std": 0.03547146532173442
+      },
+      "precision": {
+        "mean": 0.9160439560439559,
+        "std": 0.05158383209319764
+      },
+      "recall": {
+        "mean": 0.9406593406593406,
+        "std": 0.029771905899217712
+      },
+      "f1": {
+        "mean": 0.9273995480892033,
+        "std": 0.032159164232952515
+      }
+    },
+    "Random Forest": {
+      "accuracy": {
+        "mean": 0.960923076923077,
+        "std": 0.03510390325403484
+      },
+      "precision": {
+        "mean": 0.956996336996337,
+        "std": 0.03526207556404333
+      },
+      "recall": {
+        "mean": 0.9703296703296704,
+        "std": 0.03638009968625679
+      },
+      "f1": {
+        "mean": 0.9634331186055325,
+        "std": 0.033234250848025976
+      }
+    },
+    "SVM (RBF)": {
+      "accuracy": {
+        "mean": 0.9763076923076923,
+        "std": 0.019352843315097103
+      },
+      "precision": {
+        "mean": 0.9580952380952382,
+        "std": 0.0342592490449618
+      },
+      "recall": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "f1": {
+        "mean": 0.9782886334610472,
+        "std": 0.017751775585076953
+      }
+    }
+  },
+  "held_out_test_metrics": {
+    "accuracy": 0.9696969696969697,
+    "precision": 1.0,
+    "recall": 0.9411764705882353,
+    "f1": 0.9696969696969697
+  },
+  "confusion_matrix": [
+    [
+      16,
+      0
+    ],
+    [
+      1,
+      16
+    ]
+  ],
+  "feature_interpretation_note": "SVM with RBF kernel maps inputs implicitly to an infinite-dimensional feature space. Direct linear feature weights do not exist for nonlinear RBF SVM; feature importance is not fabricated.",
+  "data_leakage_checks": {
+    "scaler_fitted_only_on_train": true,
+    "target_not_in_features": true,
+    "id_not_in_features": true,
+    "train_test_no_overlap": true,
+    "test_set_unseen_during_model_selection": true
+  },
+  "limitations": [
+    "Dataset contains relatively few samples (N=161).",
+    "Professional success cannot realistically be determined only from five personality traits.",
+    "Personality-based predictions must never be used for hiring or high-stakes employment decisions.",
+    "Model outputs are strictly experimental and research-oriented.",
+    "Model predictions must not be treated as an objective measure of a person's future potential.",
+    "Statistical association does NOT imply causal mechanism."
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "algorithm": "Baseline Hybrid (Explicit Skill Overlap + TF-IDF Cosine Similarity)",
+  "weighting_formula": "0.70 * Skill Overlap + 0.30 * Text Similarity",
+  "weights": {
+    "skill_overlap": 0.7,
+    "text_similarity": 0.3
+  },
+  "total_jobs": 14840,
+  "tfidf_configuration": {
+    "token_pattern": "(?u)\\b[a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)+|\\.[a-zA-Z0-9_]+|\\b[a-zA-Z0-9_]+(?:\\+\\+|#)?",
+    "ngram_range": [
+      1,
+      2
+    ],
+    "min_df": 2,
+    "max_features": 10000,
+    "stop_words": "english",
+    "vocabulary_size": 10000
+  },
+  "artifacts": {
+    "vectorizer": "tfidf_vectorizer.joblib",
+    "matrix": "job_tfidf_matrix.joblib",
+    "job_ids": "job_tfidf_job_ids.json"
+  },
+  "created_at": "2026-10-07T11:50:22.811054+00:00",
+  "notes": "Baseline heuristic weighting. Excludes JDS salary-hike classifier and SDS personality-success classifier to prevent algorithmic bias in job suitability."
+}
