@@ -1,3602 +1,1514 @@
-# Industrial-Level Database Master Prompt
-## Purpose
-This README is a master prompt for an AI coding agent or database engineer responsible for building the database layer of the AI Talent Matching & Skill Gap Engine.
-The database must support resume understanding, structured candidate profiles, skill extraction, skill normalization, semantic job matching, explainable match scores, skill-gap analysis, career recommendations, and the optional future RAG/knowledge-grounding layer.
-The implementation target is PostgreSQL with Prisma ORM, but the design must remain understandable as a production-grade relational model.
-The prompt is intentionally strict: do not create a toy schema, do not store the entire application in one JSON column, do not duplicate normalized skill names across unrelated tables, and do not sacrifice integrity for speed of initial implementation.
-
-## Core Product Flow
-User → Resume Upload → Resume Parsing → Skill Extraction → Skill Normalization → Candidate Profile → Job Matching → Explainability → Skill Gap → Career Roadmap → What-If Simulation.
-
-## Primary Database Responsibility
-Own persistent system-of-record data.
-Maintain referential integrity.
-Represent canonical skills and aliases.
-Represent candidates and resumes.
-Represent jobs and job requirements.
-Persist match results and match explanations.
-Persist skill gaps and recommendations.
-Support reproducibility of AI analysis.
-Support versioning of AI-generated artifacts.
-Support auditability and future analytics.
-Keep secrets, raw credentials, and unsafe personal data out of ordinary tables.
-
-# MASTER PROMPT — COPY THIS TO YOUR DATABASE AI AGENT
-You are the lead database architect and PostgreSQL engineer for an industrial-grade AI Talent Matching & Skill Gap Engine.
-Your job is to design, implement, validate, document, seed, test, and harden the complete database layer.
-The application uses React + TypeScript on the frontend, Node.js + Express + TypeScript for the API layer, Python + FastAPI for AI services, PostgreSQL for persistence, and Prisma as the ORM.
-The database must support both the current hackathon MVP and a clean path toward production scale.
-
-You must treat the database as a first-class domain system, not merely a collection of tables.
-You must reason about entities, relationships, cardinality, ownership, lifecycle, integrity, indexing, uniqueness, auditability, versioning, performance, migration safety, and privacy.
-
-Do not invent product features outside the stated scope unless they are clearly marked as optional.
-Do not replace relational modeling with uncontrolled JSON blobs.
-Use JSONB only where the data is genuinely semi-structured, versioned, external, or model-generated.
-Do not store derived values when they can be safely calculated unless persistence is necessary for history, performance, or reproducibility.
-Do not create unnecessary microservice-specific databases for a 15-hour hackathon MVP.
-Use one PostgreSQL database with clear logical ownership boundaries.
-
-# 1. NON-NEGOTIABLE REQUIREMENTS
-Use PostgreSQL.
-Use Prisma ORM for application access.
-Use UUID identifiers for externally exposed entities unless there is a compelling reason otherwise.
-Use UTC timestamps for persisted timestamps.
-Use timestamptz-compatible semantics.
-Use explicit foreign keys.
-Use explicit unique constraints.
-Use check constraints where Prisma support and migration strategy permit.
-Use indexes based on actual access patterns.
-Use join tables for many-to-many relationships.
-Use soft deletion only where business history requires it.
-Never cascade-delete valuable candidate, resume, match, or audit history accidentally.
-Never store passwords in plaintext.
-Never store API keys in the database unless the architecture explicitly requires encrypted secret storage.
-Never store a raw resume as database binary data for the MVP; store a secure object/file reference and metadata.
-Never expose internal database IDs unnecessarily through public APIs.
-Never allow cross-user candidate data access.
-Never trust client-supplied ownership fields.
-The backend must derive ownership from authenticated identity.
-The AI service must not directly mutate arbitrary application tables unless a controlled service contract exists.
-
-# 2. DOMAIN ENTITIES
-The minimum domain model should include:
-1. User
-2. CandidateProfile
-3. Resume
-4. ResumeVersion
-5. Skill
-6. SkillAlias
-7. SkillCategory
-8. CandidateSkill
-9. Job
-10. JobSkill
-11. Match
-12. MatchSkillEvidence
-13. SkillGap
-14. CareerPath
-15. CareerPathSkill
-16. Recommendation
-17. AnalysisRun
-18. AIModelVersion
-19. AuditEvent
-20. Optional RAG/knowledge-source entities.
-
-Do not force every optional entity into the MVP if the team cannot implement it safely.
-The MVP must still preserve extension points for the optional entities.
-
-# 3. USER MODEL
-Create a users table/model.
-Recommended fields:
-id UUID primary key.
-email normalized to lowercase.
-email unique.
-display_name.
-role with controlled values such as CANDIDATE, RECRUITER, ADMIN.
-status with controlled values such as ACTIVE, SUSPENDED, DELETED.
-created_at.
-updated_at.
-last_login_at nullable.
-deleted_at nullable where soft deletion is required.
-
-Email normalization must be handled consistently.
-Do not create uniqueness behavior that depends on application code alone.
-Document whether email comparison is case-insensitive.
-
-# 4. CANDIDATE PROFILE
-CandidateProfile is the normalized professional profile associated with a user.
-Recommended fields:
-id UUID.
-user_id unique foreign key.
-headline nullable.
-summary nullable.
-location nullable.
-years_experience decimal or integer depending on precision requirements.
-highest_education nullable.
-current_role nullable.
-target_role nullable.
-profile_completion_score nullable.
-created_at.
-updated_at.
-
-Do not duplicate candidate identity information unnecessarily.
-Do not make resume text the source of truth for every profile field.
-Store extracted profile attributes separately from raw resume content.
-
-# 5. RESUME MODEL
-A resume represents a logical uploaded document.
-Recommended fields:
-id UUID.
-candidate_id foreign key.
-original_filename.
-mime_type.
-storage_key.
-file_size_bytes.
-status.
-uploaded_at.
-created_at.
-updated_at.
-deleted_at nullable.
-
-Allowed status values may include UPLOADED, PROCESSING, PROCESSED, FAILED, ARCHIVED.
-Do not use arbitrary free-text status values.
-Store failure information separately if detailed diagnostics are required.
-
-# 6. RESUME VERSIONING
-ResumeVersion must preserve the exact version analyzed by the AI pipeline.
-Recommended fields:
-id UUID.
-resume_id foreign key.
-version_number integer.
-text_content reference or controlled extracted text depending on privacy/storage policy.
-text_hash.
-parser_version.
-language.
-extraction_metadata JSONB.
-created_at.
-
-Unique constraint: resume_id + version_number.
-Unique or indexed text_hash may support duplicate detection.
-AI analysis must reference the resume version, not merely the logical resume.
-
-# 7. SKILL TAXONOMY
-The skill taxonomy is a core shared domain object.
-A skill must have one canonical identity.
-Recommended fields:
-id UUID.
-canonical_name.
-slug.
-description nullable.
-category_id nullable.
-skill_type.
-status.
-source.
-external_id nullable.
-created_at.
-updated_at.
-
-Examples of canonicalization:
-JS → JavaScript.
-React.js → React.
-ReactJS → React.
-Postgres → PostgreSQL.
-Node → Node.js.
-
-Do not create separate canonical skills merely because aliases differ.
-
-# 8. SKILL CATEGORIES
-SkillCategory groups skills into meaningful domains.
-Examples:
-Programming Language.
-Frontend.
-Backend.
-Database.
-Cloud.
-DevOps.
-Machine Learning.
-Data Science.
-AI.
-IoT.
-Security.
-Testing.
-Soft Skills.
-Tools.
-Frameworks.
-Libraries.
-
-Categories must not be used as a substitute for skill identity.
-
-# 9. SKILL ALIASES
-Create a skill_aliases table.
-Fields:
-id UUID.
-skill_id foreign key.
-alias normalized.
-alias_type.
-source.
-confidence.
-created_at.
-
-Unique constraint should prevent duplicate aliases for the same canonical skill.
-If global alias uniqueness is desired, enforce it after validating multilingual and contextual requirements.
-Never silently map an ambiguous alias to a skill without a deterministic policy.
-
-# 10. CANDIDATE-SKILL RELATIONSHIP
-Use a candidate_skills join table.
-Required concepts:
-candidate_profile_id.
-skill_id.
-proficiency_level nullable.
-years_used nullable.
-evidence_source.
-confidence_score.
-verified flag.
-first_detected_at.
-last_detected_at.
-created_at.
-updated_at.
-
-Unique candidate_profile_id + skill_id.
-Evidence source can identify RESUME, USER_INPUT, ASSESSMENT, IMPORT, or OTHER.
-AI confidence is not the same as proficiency.
-Never use confidence_score as a substitute for proficiency_level.
-
-# 11. JOB MODEL
-Jobs represent target opportunities against which candidates are matched.
-Recommended fields:
-id UUID.
-external_id nullable.
-title.
-normalized_title nullable.
-company_name nullable.
-description.
-location nullable.
-employment_type nullable.
-experience_min nullable.
-experience_max nullable.
-education_requirement nullable.
-status.
-source.
-published_at nullable.
-expires_at nullable.
-created_at.
-updated_at.
-
-Do not depend on live scraping for the hackathon MVP.
-Seed curated jobs into PostgreSQL.
-The schema should still support external job sources later.
-
-# 12. JOB-SKILL RELATIONSHIP
-Use a job_skills join table.
-Fields:
-job_id.
-skill_id.
-importance_weight.
-required boolean.
-minimum_proficiency nullable.
-years_required nullable.
-evidence_source.
-created_at.
-updated_at.
-
-Unique job_id + skill_id.
-importance_weight should be constrained to a documented range.
-Required skills must be distinguishable from preferred skills.
-
-# 13. MATCH MODEL
-A Match is a persisted candidate-to-job evaluation.
-Fields:
-id UUID.
-candidate_id.
-job_id.
-analysis_run_id.
-overall_score.
-semantic_score.
-skill_score.
-experience_score.
-education_score.
-confidence_score nullable.
-rank nullable.
-status.
-created_at.
-updated_at.
-
-Store component scores so the UI can explain the result.
-Do not store only a single opaque score.
-Score ranges must be explicit and validated.
-
-# 14. MATCH EVIDENCE
-Create match_skill_evidence to explain why a match scored highly or poorly.
-Each evidence row may contain:
-match_id.
-skill_id.
-candidate_skill_id nullable.
-job_skill_id.
-evidence_type.
-candidate_value.
-job_requirement.
-contribution_score.
-explanation.
-created_at.
-
-Examples:
-MATCHED_SKILL.
-MISSING_SKILL.
-PARTIAL_SKILL.
-RELATED_SKILL.
-EXPERIENCE_GAP.
-CERTIFICATION_MATCH.
-
-# 15. SKILL GAP MODEL
-Skill gaps represent missing or insufficient skills relative to a target job or career path.
-Fields:
-id UUID.
-candidate_id.
-job_id nullable.
-career_path_id nullable.
-skill_id.
-gap_type.
-priority.
-current_level nullable.
-required_level nullable.
-estimated_effort_hours nullable.
-recommended_action nullable.
-status.
-created_at.
-updated_at.
-
-At least one target context should exist: job or career path.
-Avoid duplicated skill gaps by defining a deterministic uniqueness strategy.
-
-# 16. CAREER PATH
-Career paths model progression toward target roles.
-Fields:
-id UUID.
-name.
-description.
-source.
-difficulty.
-estimated_duration_months nullable.
-status.
-created_at.
-updated_at.
-
-Examples:
-Junior Data Analyst → Data Analyst → Senior Data Analyst.
-Frontend Developer → Full Stack Developer.
-Software Engineer → ML Engineer.
-
-# 17. CAREER PATH SKILLS
-CareerPathSkill maps required or recommended skills to career paths.
-Fields:
-career_path_id.
-skill_id.
-importance_weight.
-required boolean.
-recommended_level nullable.
-sequence_order nullable.
-created_at.
-
-Unique career_path_id + skill_id.
-sequence_order may be used for staged roadmaps.
-
-# 18. RECOMMENDATIONS
-Recommendations are generated outputs and must be distinguishable from source knowledge.
-Fields:
-id UUID.
-candidate_id.
-target_job_id nullable.
-career_path_id nullable.
-type.
-title.
-description.
-priority.
-reason.
-source_analysis_run_id.
-created_at.
-expires_at nullable.
-
-Examples:
-LEARN_SKILL.
-BUILD_PROJECT.
-PRACTICE_SKILL.
-IMPROVE_RESUME.
-TARGET_ROLE.
-CERTIFICATION.
-
-# 19. ANALYSIS RUNS
-Create an analysis_runs model to make AI processing reproducible.
-Fields:
-id UUID.
-candidate_id.
-resume_version_id nullable.
-job_id nullable.
-pipeline_version.
-model_version_id nullable.
-status.
-started_at.
-completed_at nullable.
-error_code nullable.
-error_message nullable.
-input_hash nullable.
-output_hash nullable.
-metadata JSONB.
-created_at.
-
-Every important AI-generated result should be traceable to an analysis run.
-
-# 20. AI MODEL VERSION
-Persist the identity of models used for important scoring or extraction.
-Fields:
-id UUID.
-provider.
-model_name.
-model_version.
-task_type.
-configuration JSONB.
-created_at.
-
-Do not store API secrets in configuration JSON.
-Configuration should contain non-secret reproducibility metadata.
-
-# 21. AUDIT EVENTS
-Create audit_events for security-sensitive and important business mutations.
-Fields:
-id UUID.
-actor_user_id nullable.
-event_type.
-entity_type.
-entity_id.
-request_id nullable.
-metadata JSONB.
-created_at.
-
-Never place passwords, tokens, resume contents, or sensitive secrets into audit metadata.
-
-# 22. OPTIONAL KNOWLEDGE/RAG LAYER
-RAG is optional for the MVP.
-If implemented, model knowledge separately from generated recommendations.
-Possible entities:
-knowledge_source.
-knowledge_document.
-knowledge_chunk.
-knowledge_embedding reference.
-knowledge_skill_link.
-
-The database should not require RAG for semantic candidate-job matching.
-Embeddings and RAG solve different problems.
-Candidate-job matching can use embeddings directly.
-RAG can ground career explanations in a controlled knowledge base.
-
-# 23. NORMALIZATION RULES
-Target at least Third Normal Form for core transactional entities.
-Do not duplicate canonical skill names into candidate_skills.
-Do not duplicate job descriptions into match rows.
-Do not store company data repeatedly if a company entity becomes necessary at scale.
-Do not create one column per skill.
-Do not create skill_1, skill_2, skill_3 columns.
-Do not store arbitrary arrays for relational entities when a join table is appropriate.
-Use JSONB for truly variable metadata, not for the primary relational model.
-
-# 24. IDENTIFIER POLICY
-Use UUID primary keys.
-Prefer generated UUIDs at the database or ORM layer.
-Do not expose sequential numeric IDs for sensitive candidate resources.
-Use stable external identifiers only when an upstream source provides one.
-Never use email as a foreign key.
-Never use skill names as foreign keys.
-
-# 25. TIMESTAMP POLICY
-Every mutable domain entity should have created_at and updated_at.
-Use UTC.
-Use database-generated timestamps where practical.
-Never derive audit chronology from application-local time.
-Keep published_at and expires_at separate from created_at.
-Keep processing timestamps separate from entity timestamps.
-
-# 26. SOFT DELETE POLICY
-Use deleted_at only where historical retention matters.
-Do not automatically soft-delete every table.
-For reference data such as skills, prefer status=INACTIVE instead of deletion.
-For jobs, use status or expiration.
-For resumes, preserve historical versions when required for auditability.
-Document every deletion policy.
-
-# 27. CONSTRAINT POLICY
-Add NOT NULL to required fields.
-Add UNIQUE constraints for business identifiers.
-Add foreign keys for relationships.
-Add CHECK constraints for score ranges.
-Add CHECK constraints for non-negative quantities.
-Add CHECK constraints for valid date relationships when practical.
-Prevent negative file sizes.
-Prevent negative experience years.
-Prevent invalid percentage values.
-Prevent importance weights outside their documented range.
-
-# 28. INDEXING STRATEGY
-Index foreign keys used in filtering.
-Index users.email.
-Index candidate_profiles.user_id.
-Index resumes.candidate_id.
-Index resume_versions.resume_id.
-Index candidate_skills.skill_id.
-Index jobs.status.
-Index jobs.normalized_title.
-Index job_skills.skill_id.
-Index matches.candidate_id.
-Index matches.job_id.
-Index matches.overall_score when ranking is frequent.
-Index skill_gaps.candidate_id.
-Index recommendations.candidate_id.
-Index analysis_runs.candidate_id.
-Index created_at for time-oriented queries where needed.
-
-Do not blindly index every column.
-Every index must have a reason tied to a query pattern.
-
-# 29. COMPOSITE INDEXES
-Consider candidate_id + skill_id for candidate skill lookup.
-Consider job_id + skill_id for job skill lookup.
-Consider candidate_id + created_at for recent candidate analyses.
-Consider candidate_id + status for active gaps.
-Consider job_id + status for active job workflows.
-Consider match candidate_id + overall_score DESC for top candidate matches.
-Use EXPLAIN ANALYZE to validate high-value indexes.
-
-# 30. QUERY PATTERNS TO SUPPORT
-Fetch candidate profile with normalized skills.
-Fetch all active resumes for a candidate.
-Fetch latest processed resume version.
-Fetch all skills required by a job.
-Fetch all skills possessed by a candidate.
-Compute matched skills.
-Compute missing skills.
-Fetch top jobs by match score.
-Fetch active skill gaps.
-Fetch career paths relevant to target skills.
-Fetch recommendations generated by the latest analysis.
-Fetch analysis history.
-Fetch audit events for an entity.
-
-# 31. MATCHING DATA DESIGN
-The database must store enough information to reproduce the match explanation.
-Persist semantic_score.
-Persist skill_score.
-Persist experience_score.
-Persist education_score.
-Persist overall_score.
-Persist the analysis/model version.
-Persist evidence rows for important skills.
-Do not persist only the final ranking.
-
-Recommended conceptual formula:
-overall_score = 0.50 * semantic_score + 0.30 * skill_score + 0.10 * experience_score + 0.10 * education_score.
-Treat the formula as configuration rather than hard-coded business truth if future experimentation is expected.
-
-# 32. SKILL GAP DATA DESIGN
-A missing skill should be represented as structured data.
-Store skill_id, target context, current level, required level, priority, and recommendation.
-Do not create one free-text paragraph as the only representation.
-The UI should be able to query all gaps for a candidate.
-The recommendation engine should be able to rank gaps.
-
-# 33. WHAT-IF SIMULATION
-The what-if feature should not mutate the candidate's actual profile.
-Create a simulation request/result model if persistence is required.
-Otherwise compute simulation results transiently.
-A simulation should compare baseline score against hypothetical skill additions.
-Never insert hypothetical skills into candidate_skills unless the user explicitly confirms adoption.
-If persisted, clearly mark simulations as hypothetical.
-
-# 34. DATA SEEDING
-Create deterministic seed data.
-Seed at least 100 canonical skills where feasible.
-Seed aliases for common technologies.
-Seed at least 50 curated job records for a compelling demo.
-Seed required and preferred job skills.
-Seed 10 or more career paths.
-Seed career-path skills.
-Use deterministic UUIDs or reproducible seed generation.
-Never seed real people's personal data.
-Never commit production secrets.
-
-# 35. MVP SEED JOBS
-Include roles such as:
-Software Engineer.
-Frontend Developer.
-Backend Developer.
-Full Stack Developer.
-Data Analyst.
-Data Scientist.
-Machine Learning Engineer.
-AI Engineer.
-DevOps Engineer.
-Cloud Engineer.
-IoT Engineer.
-Cybersecurity Analyst.
-
-Each job should have realistic descriptions and structured skill requirements.
-
-# 36. MIGRATION STRATEGY
-Every schema change must be represented as a migration.
-Never manually modify production schema without recording the change.
-Review generated SQL.
-Avoid destructive migrations during the hackathon unless the database is disposable.
-When renaming columns, preserve data.
-When changing enums, consider existing values.
-When adding required columns, add a safe default or backfill before enforcing NOT NULL.
-
-# 37. PRISMA REQUIREMENTS
-Use explicit relation names when Prisma relations could become ambiguous.
-Use mapped database names when naming conventions require snake_case.
-Keep schema.prisma readable.
-Use enums for controlled states where appropriate.
-Use Decimal for values requiring decimal precision.
-Use Json for JSONB metadata where appropriate.
-Do not represent every domain relation as Json.
-Run Prisma format.
-Run Prisma validate.
-Generate the Prisma client after schema changes.
-Run migrations in a disposable development database before integration.
-
-# 38. POSTGRESQL REQUIREMENTS
-Use PostgreSQL-native features when they materially improve integrity or performance.
-Consider CITEXT for case-insensitive email handling if the deployment policy supports it.
-Consider pg_trgm for fuzzy search if required.
-Consider pgvector only if embeddings are stored inside PostgreSQL.
-Do not add pgvector merely because the system uses embeddings.
-If embeddings remain in the Python service or another vector system, PostgreSQL can store only references and metadata.
-
-# 39. EMBEDDING STORAGE DECISION
-Choose one explicit strategy.
-Strategy A: PostgreSQL + pgvector.
-Strategy B: external vector store.
-Strategy C: no persistent vector store for the MVP; compute embeddings during matching and cache later.
-
-For a 15-hour hackathon, Strategy C or a simple pgvector implementation is acceptable.
-Do not introduce a complex vector infrastructure unless the team can operate it reliably.
-
-# 40. SECURITY
-Use least-privilege database credentials.
-Use separate development and production credentials.
-Never commit .env files.
-Use .env.example with placeholders.
-Restrict database network access.
-Use TLS in production where supported.
-Rotate compromised credentials immediately.
-Do not log database passwords.
-Do not log resume contents.
-Do not log authentication tokens.
-Sanitize error messages returned to clients.
-
-# 41. PRIVACY
-Resumes can contain personal information.
-Minimize stored raw resume text.
-Define retention rules.
-Allow deletion workflows where required.
-Do not use candidate data for unrelated purposes.
-Separate sensitive raw documents from structured analytics.
-Do not include personally identifiable resume data in demo seed data.
-
-# 42. OWNERSHIP AND AUTHORIZATION
-Every candidate-owned query must enforce ownership.
-The backend must derive user_id from authenticated context.
-Never trust candidate_id from the frontend.
-Recruiter access must be explicitly authorized.
-Admin access must be explicit.
-A candidate must never access another candidate's resume, skill profile, matches, or analysis history.
-
-# 43. TRANSACTION RULES
-Use transactions for multi-table state transitions.
-Resume processing state changes should be consistent.
-Creating a job and its required skills should be atomic where appropriate.
-Persisting a completed match and its evidence should be atomic where practical.
-Never leave a Match row without required evidence if evidence is part of the completion contract.
-Use idempotency for retried AI callbacks or API requests.
-
-# 44. IDEMPOTENCY
-Design AI processing to tolerate retries.
-Use analysis input hashes.
-Use deterministic pipeline identifiers where practical.
-Do not duplicate candidate skills on repeated extraction.
-Do not create duplicate jobs when importing the same external identifier.
-Do not create duplicate aliases.
-Do not create duplicate career-path skill relationships.
-
-# 45. AI PIPELINE STATE
-Represent pipeline status explicitly.
-Suggested states:
-QUEUED.
-PROCESSING.
-COMPLETED.
-FAILED.
-CANCELLED.
-Do not use dozens of unstructured states.
-Keep error_code and error_message separate.
-
-# 46. FAILURE HANDLING
-AI failures must not corrupt the candidate profile.
-Parser failure should mark the analysis run failed.
-A failed analysis should not automatically delete a previous successful profile.
-New successful analysis should create a new version or update a clearly versioned profile state.
-Preserve prior successful results for auditability if required.
-
-# 47. VERSIONING STRATEGY
-Version resumes.
-Version AI pipelines.
-Version AI models.
-Version matching formulas when material.
-Version career recommendation policies when material.
-Never silently change the meaning of historical match scores.
-
-# 48. REPRODUCIBILITY
-Given a resume version, job version, model version, and scoring configuration, the system should be able to explain how a historical match was produced.
-Persist enough metadata to reconstruct the evaluation.
-Do not rely on today's model to explain yesterday's score.
-
-# 49. DATA QUALITY
-Canonical skill names must be non-empty.
-Aliases must be normalized.
-Job titles should have normalized forms where practical.
-Scores must be within defined ranges.
-Experience must not be negative.
-Date ranges must be valid.
-Required job skills must point to active skills.
-Inactive skills should not be newly assigned without an explicit migration policy.
-
-# 50. API-DATABASE CONTRACT
-The database schema must map cleanly to the backend API.
-Recommended endpoints:
-POST /api/resume/upload
-POST /api/resume/analyze
-GET /api/profile
-GET /api/jobs
-POST /api/match
-GET /api/matches
-GET /api/skill-gaps
-GET /api/roadmap
-POST /api/simulate
-
-Do not expose ORM-specific structures directly if they create unstable public contracts.
-
-# 51. DTO REQUIREMENTS
-Create request and response DTOs.
-Do not allow Prisma model objects to become the accidental API contract.
-Hide internal metadata unless needed.
-Hide audit fields from ordinary candidate responses.
-Never return secrets.
-Paginate list endpoints.
-
-# 52. PAGINATION
-All potentially large list endpoints must support pagination.
-Prefer cursor pagination for high-scale feeds.
-Offset pagination is acceptable for small hackathon datasets.
-Document default page size.
-Set maximum page size.
-
-# 53. SORTING
-Allow only approved sort fields.
-Do not concatenate arbitrary user input into ORDER BY SQL.
-For matches, allow score-descending and recent-first sorting.
-For jobs, allow relevance, date, and title sorting as required.
-
-# 54. SEARCH
-Support canonical skill search.
-Support job title search.
-Support skill alias resolution.
-For fuzzy search, use PostgreSQL extensions only when justified.
-Do not replace deterministic normalization with fuzzy search alone.
-
-# 55. REPORTING
-The schema should support dashboard metrics.
-Candidate metrics:
-Total skills.
-Verified skills.
-Top matching jobs.
-Average match score.
-Critical skill gaps.
-Profile completion.
-Career-path readiness.
-
-System metrics:
-Number of candidates.
-Number of jobs.
-Number of analyses.
-Analysis success rate.
-Average processing duration.
-
-# 56. OBSERVABILITY
-Persist request_id or correlation_id where useful.
-Track analysis duration.
-Track processing status.
-Do not store raw logs in relational business tables.
-Use application logging for verbose diagnostics.
-
-# 57. PERFORMANCE TARGETS
-Design for responsive dashboard queries on the seeded dataset.
-Candidate profile retrieval should use a small number of indexed queries.
-Top job matches should avoid N+1 queries.
-Use batch loading or joins where appropriate.
-Avoid loading every job and every skill into Node.js for every request.
-Use database aggregation for suitable analytics.
-
-# 58. N+1 PREVENTION
-Identify relation-heavy API responses.
-Use Prisma include/select carefully.
-Do not fetch every job and then query its skills individually.
-Do not fetch every candidate and then query skills individually.
-Use batch queries.
-Measure before optimizing complex queries.
-
-# 59. DATABASE TESTING
-Write migration validation tests.
-Write uniqueness tests.
-Write foreign-key tests.
-Write ownership tests.
-Write candidate-skill tests.
-Write job-skill tests.
-Write match persistence tests.
-Write skill-gap tests.
-Write seed determinism tests.
-Write transaction rollback tests where practical.
-
-# 60. REQUIRED DATABASE TEST CASES
-Create user.
-Reject duplicate email.
-Create candidate profile.
-Reject candidate profile without user.
-Upload resume.
-Create resume version.
-Reject duplicate resume version number.
-Create canonical skill.
-Create alias.
-Prevent duplicate candidate skill.
-Create job.
-Create job skill.
-Prevent duplicate job skill.
-Create match.
-Persist match evidence.
-Persist skill gap.
-Persist recommendation.
-Retry analysis without duplicate results.
-Reject unauthorized candidate access.
-
-# 61. SEED QUALITY
-Seed data should look realistic in the demo.
-Use diverse job descriptions.
-Use different combinations of skills.
-Include partial overlaps between jobs.
-Include jobs with both required and preferred skills.
-Include skills that deliberately create visible gaps.
-Include career paths that connect those gaps to recommendations.
-
-# 62. DEMO SCENARIO
-Use a candidate with JavaScript, React, Node.js, PostgreSQL, Git, and basic Python.
-Match against Full Stack Developer, Frontend Developer, Backend Developer, and AI Engineer jobs.
-The database should make it possible to show:
-Matched skills.
-Missing skills.
-Partial skills.
-Overall score.
-Score components.
-Career recommendation.
-What-if score improvement.
-
-# 63. WHAT THE DATABASE ENGINEER MUST DELIVER
-1. Prisma schema.
-2. PostgreSQL migration.
-3. Seed script.
-4. Seed JSON datasets if used.
-5. Database ERD documentation.
-6. Index documentation.
-7. Data dictionary.
-8. Integrity constraints.
-9. Test suite.
-10. Example queries.
-11. Environment template.
-12. Database README.
-
-# 64. REQUIRED FILE STRUCTURE
-database/
-├── prisma/
-│   ├── schema.prisma
-│   ├── migrations/
-│   └── seed.ts
-├── seeds/
-│   ├── skills.json
-│   ├── aliases.json
-│   ├── jobs.json
-│   └── career_paths.json
-├── sql/
-│   ├── indexes.sql
-│   ├── constraints.sql
-│   └── analytics.sql
-├── tests/
-│   ├── integrity.test.ts
-│   ├── ownership.test.ts
-│   └── seed.test.ts
-└── README.md
-
-# 65. ENVIRONMENT
-DATABASE_URL must be supplied through environment variables.
-Example only:
-DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME
-Never commit a real credential.
-Use .env.example.
-
-# 66. DEVELOPMENT COMMANDS
-npm install
-npx prisma format
-npx prisma validate
-npx prisma generate
-npx prisma migrate dev
-npx prisma db seed
-npm test
-
-Adapt commands to the actual package manager and project structure.
-
-# 67. DATABASE ERD REQUIREMENT
-Create an ERD showing:
-User → CandidateProfile.
-CandidateProfile → Resume.
-Resume → ResumeVersion.
-CandidateProfile ↔ Skill through CandidateSkill.
-Job ↔ Skill through JobSkill.
-CandidateProfile ↔ Job through Match.
-Match → MatchSkillEvidence.
-CandidateProfile → SkillGap.
-CareerPath ↔ Skill through CareerPathSkill.
-CandidateProfile → Recommendation.
-AnalysisRun links the AI pipeline artifacts.
-AIModelVersion identifies model provenance.
-
-# 68. DATA DICTIONARY
-Document every table.
-Document every column.
-Document data type.
-Document nullability.
-Document default.
-Document constraints.
-Document relationship.
-Document business meaning.
-Document whether the value is source data, derived data, or AI-generated data.
-
-# 69. SOURCE VS DERIVED DATA
-Source data examples:
-User email.
-Resume file reference.
-Job description.
-Canonical skill.
-
-Derived data examples:
-Profile completion.
-Skill score.
-Semantic score.
-Overall match score.
-Skill gap priority.
-
-AI-generated data examples:
-Extracted skills.
-Resume summary.
-Recommendation explanation.
-Career roadmap.
-
-Mark these distinctions in documentation.
-
-# 70. JSONB POLICY
-Allowed JSONB examples:
-Parser metadata.
-Model configuration.
-External source metadata.
-AI explanation metadata.
-Flexible import metadata.
-
-Disallowed JSONB shortcuts:
-All candidate skills in one blob.
-All job skills in one blob.
-All matches in one blob.
-Entire database state in one JSON object.
-
-# 71. ENUM POLICY
-Use enums for stable controlled states.
-Examples:
-UserRole.
-UserStatus.
-ResumeStatus.
-AnalysisStatus.
-MatchStatus.
-SkillStatus.
-GapPriority.
-RecommendationType.
-
-Use strings when values are expected to be frequently extended by administrators and database migrations would become a burden.
-
-# 72. REFERENCE DATA
-Skills, categories, aliases, career paths, and standardized job metadata may be treated as reference data.
-Reference data should have lifecycle status.
-Reference data should be seeded consistently.
-Reference data changes should be auditable when they affect scoring.
-
-# 73. FAIRNESS AND BIAS DATA
-Do not use protected demographic attributes for candidate-job matching.
-Do not store sensitive attributes simply to improve matching.
-If fairness analysis is introduced later, use a carefully governed separate data model and explicit legal/ethical review.
-The core scoring model should use job-relevant professional attributes.
-
-# 74. EXPLAINABILITY
-Every displayed match score should have explainable components.
-The database must support statements such as:
-You match 8 of 10 required skills.
-You are missing Docker.
-Your semantic profile similarity is high.
-You meet the stated experience requirement.
-You may improve your score by learning Kubernetes.
-
-Do not generate explanations that cannot be traced to stored evidence or a documented scoring process.
-
-# 75. CAREER ROADMAP
-Roadmap data should be queryable by stage.
-A roadmap may contain:
-Current state.
-Target role.
-Gap skills.
-Learning order.
-Project recommendations.
-Estimated effort.
-Milestones.
-
-If the MVP does not need persisted roadmap steps, generate them from career_path and skill_gap data rather than creating unnecessary tables.
-
-# 76. ANALYTICS QUERIES
-Prepare queries for:
-Top skills across jobs.
-Most common candidate skills.
-Most common skill gaps.
-Average match score by job role.
-Skills with highest demand.
-Skills with highest candidate shortage.
-Career paths with highest readiness.
-
-# 77. DATA RETENTION
-Define retention for raw resumes.
-Define retention for parsed text.
-Define retention for analysis results.
-Define retention for audit events.
-Do not delete historical records automatically without documented policy.
-
-# 78. BACKUP AND RECOVERY
-Document PostgreSQL backup strategy.
-For the hackathon, at minimum export seed data and schema migrations.
-For production, use automated backups.
-Test restore procedures.
-Never treat Git as the database backup.
-
-# 79. DISASTER RECOVERY
-Document how to recreate the database from migrations and seed data.
-Document required extensions.
-Document environment variables.
-Document restoration order.
-Document how to verify integrity after restoration.
-
-# 80. DEPLOYMENT
-Database deployment must be separated from application deployment conceptually.
-Run migrations before code that depends on new columns.
-Use a migration job or controlled deployment step.
-Never run destructive development commands against production.
-
-# 81. DOCKER
-Provide a development PostgreSQL container if useful.
-Persist data with a named volume.
-Expose PostgreSQL only as required.
-Do not hard-code production passwords in docker-compose.
-Provide .env.example.
-
-# 82. PERFORMANCE TEST DATA
-Create a script capable of generating larger synthetic datasets.
-Test with thousands of candidates and jobs if time permits.
-Measure top-match query latency.
-Measure candidate dashboard query latency.
-Measure skill-gap query latency.
-Record query plans for expensive queries.
-
-# 83. LOAD TESTING
-Test concurrent reads.
-Test concurrent match writes.
-Test repeated analysis callbacks.
-Check connection pool behavior.
-Do not create a new database connection for every request.
-
-# 84. CONNECTION MANAGEMENT
-Use a singleton Prisma client per Node.js process.
-Configure connection pool appropriately for deployment.
-Handle database connection errors gracefully.
-Do not create Prisma clients inside request handlers.
-
-# 85. ERROR HANDLING
-Map database errors to safe application errors.
-Unique violations should become conflict responses.
-Foreign-key violations should become validation/conflict responses.
-Connection failures should become temporary service errors.
-Never return raw SQL or stack traces to end users.
-
-# 86. MIGRATION REVIEW CHECKLIST
-Does the migration preserve existing data?
-Does it add required indexes?
-Does it add constraints?
-Does it introduce a destructive change?
-Does it require backfill?
-Does it lock a large table?
-Can the application run during migration?
-Does rollback exist or is forward-only recovery documented?
-
-# 87. CODE QUALITY
-Use descriptive names.
-Avoid abbreviations.
-Keep schema conventions consistent.
-Keep migrations small and reviewable.
-Keep seed logic deterministic.
-Document non-obvious decisions.
-Do not leave TODOs for core integrity rules.
-
-# 88. GIT REQUIREMENTS
-Commit schema changes with migrations.
-Do not commit secrets.
-Do not commit generated database dumps containing personal data.
-Review diffs before pushing.
-Use feature branches for database work.
-Coordinate migration order with backend developers.
-
-# 89. TEAM INTEGRATION
-Ankit owns database and seed data.
-Adil consumes database through backend APIs.
-Mayank writes AI extraction outputs according to the candidate-skill contract.
-Rohit consumes job, skill, candidate, and match data for the matching engine.
-Kanishaka consumes stable API DTOs rather than querying the database directly.
-The frontend must never connect directly to PostgreSQL.
-
-# 90. API OWNERSHIP RULE
-Frontend → Backend.
-Backend → Database.
-Backend → AI Service.
-AI Service → controlled AI contract.
-Never Frontend → Database.
-Never expose PostgreSQL credentials to the browser.
-
-# 91. AI SERVICE CONTRACT
-The AI service may receive a resume reference or extracted text depending on security architecture.
-It should return structured extraction results.
-Example conceptual output:
-candidate_summary.
-skills[].canonical_name.
-skills[].confidence.
-experience.
-education.
-projects.
-certifications.
-
-The backend validates the response before persistence.
-
-# 92. VALIDATION OF AI OUTPUT
-Never blindly persist AI output.
-Validate canonical skill identifiers.
-Validate score ranges.
-Validate required fields.
-Reject malformed arrays.
-Normalize aliases.
-Apply deterministic mapping where possible.
-Log validation failures without leaking resume contents.
-
-# 93. SKILL NORMALIZATION WORKFLOW
-Raw extracted skill.
-↓
-Lowercase/trim/normalize punctuation.
-↓
-Alias lookup.
-↓
-Canonical skill.
-↓
-Persist candidate_skill.
-
-If no deterministic match exists, place the candidate skill into a review/unknown pathway rather than silently inventing a canonical skill.
-
-# 94. JOB NORMALIZATION WORKFLOW
-Raw job title.
-↓
-Normalize title.
-↓
-Extract required skills.
-↓
-Resolve aliases.
-↓
-Persist job_skills.
-↓
-Mark required/preferred.
-
-# 95. MATCH WORKFLOW
-Load candidate profile.
-Load candidate skills.
-Load target jobs.
-Load job skills.
-Call embedding/matching service.
-Calculate component scores.
-Persist match.
-Persist evidence.
-Persist skill gaps.
-Persist recommendations.
-Return ranked results.
-
-# 96. TRANSACTION BOUNDARIES
-Candidate profile extraction should use a transaction for replacing or versioning derived candidate skills.
-Match completion should use a transaction for match plus evidence plus gaps when all are generated together.
-Recommendation persistence should be transactional when dependent on match/gap IDs.
-
-# 97. REPLACEMENT VS APPEND
-When a new resume analysis runs, do not blindly append duplicate skills.
-Choose one explicit policy:
-Policy A: versioned derived profile snapshots.
-Policy B: update current profile while preserving analysis history.
-Document the chosen policy.
-For the hackathon, versioned analysis history plus current candidate profile is recommended.
-
-# 98. SNAPSHOT STRATEGY
-If historical reproducibility matters, preserve the input resume version and analysis run.
-Historical matches should point to the analysis run that produced them.
-Do not recompute old scores silently after model updates.
-
-# 99. RECOMMENDED MVP SCHEMA
-For the strict 15-hour MVP, implement:
-users.
-candidate_profiles.
-resumes.
-resume_versions.
-skill_categories.
-skills.
-skill_aliases.
-candidate_skills.
-jobs.
-job_skills.
-matches.
-match_skill_evidence.
-skill_gaps.
-career_paths.
-career_path_skills.
-recommendations.
-analysis_runs.
-ai_model_versions.
-audit_events.
-
-# 100. DO NOT OVERENGINEER THE MVP
-Do not build a distributed database.
-Do not build event sourcing unless required.
-Do not add Kafka.
-Do not add multiple database engines.
-Do not add a graph database.
-Do not add Elasticsearch unless search requirements justify it.
-Do not add a vector database if simple PostgreSQL or in-memory matching is sufficient.
-Do not implement live job scraping.
-Do not build a huge global ontology.
-Do not spend the 15-hour hackathon building infrastructure instead of the product.
-
-# 101. INDUSTRIAL EXTENSION PATH
-After the MVP is stable, consider:
-Read replicas.
-Partitioning for large analysis history.
-pgvector.
-Search indexes.
-Queue-backed analysis jobs.
-Object storage lifecycle policies.
-Row-level security where justified.
-Data warehouse for analytics.
-Feature store for ML experiments.
-Dedicated recommendation service.
-
-# 102. ROW-LEVEL SECURITY
-RLS may be considered for production defense-in-depth.
-Do not enable RLS blindly during the hackathon if the application architecture is not prepared for it.
-If enabled, document service roles and policies.
-
-# 103. AUDITABILITY
-Record who initiated sensitive changes.
-Record what entity changed.
-Record when it changed.
-Record request correlation ID where possible.
-Do not record confidential payloads unnecessarily.
-
-# 104. DATA CLASSIFICATION
-Classify fields as:
-PUBLIC.
-INTERNAL.
-PERSONAL.
-SENSITIVE.
-SECRET.
-
-Passwords and API keys are SECRET.
-Resume content is PERSONAL/SENSITIVE depending on content.
-Canonical skills are generally INTERNAL/PUBLIC.
-
-# 105. PII MINIMIZATION
-Store only fields required by the product.
-Avoid unnecessary phone numbers, addresses, demographic information, or identifiers.
-If contact data is needed, document why.
-
-# 106. DATA EXPORT
-Provide a controlled candidate data export strategy if required.
-Export should exclude internal audit metadata and secrets.
-Export should include candidate profile, skills, resumes metadata, and user-owned recommendations as appropriate.
-
-# 107. DATA DELETION
-A candidate deletion request must define what happens to:
-User.
-Candidate profile.
-Resumes.
-Resume versions.
-Skills.
-Matches.
-Skill gaps.
-Recommendations.
-Audit events.
-
-Do not delete shared reference skills when a candidate is deleted.
-
-# 108. REFERENTIAL ACTIONS
-Use RESTRICT or carefully chosen CASCADE behavior.
-Reference data should rarely cascade-delete.
-Candidate-owned dependent records may cascade only after privacy and audit requirements are understood.
-Historical records may require anonymization rather than deletion.
-
-# 109. DUPLICATE DETECTION
-Resume duplicate detection can use file hash and extracted text hash.
-Job duplicate detection can use external source ID or a carefully designed composite fingerprint.
-Do not use filename alone for duplicate detection.
-
-# 110. HASHING
-Use cryptographic hashes for integrity and duplicate detection.
-Do not use hashes as a replacement for encryption.
-Do not expose internal hashes unless necessary.
-
-# 111. ENCRYPTION
-Use encrypted object storage for resumes in production.
-Use database encryption-at-rest where provided by the deployment environment.
-Do not implement custom cryptography.
-
-# 112. FILE METADATA
-Store MIME type.
-Store file size.
-Store storage key.
-Store checksum.
-Store upload time.
-Do not trust client MIME type without server-side validation.
-
-# 113. RESUME PARSER COMPATIBILITY
-Support PDF and DOCX in the application contract.
-The database should not care about parser implementation.
-Store parser version and extraction status.
-
-# 114. INTERNATIONALIZATION
-Design skill names and job titles as Unicode-safe.
-Do not assume ASCII-only values.
-If multilingual aliases are introduced, add language metadata.
-
-# 115. LANGUAGE METADATA
-Resume version may store detected language.
-Skill aliases may optionally store language.
-Do not create language-specific duplicate canonical skills unless semantics truly differ.
-
-# 116. TAXONOMY SOURCES
-The project may use standardized occupational or skill knowledge such as O*NET or ESCO as external reference concepts.
-Do not copy restricted datasets without checking licensing.
-Store source and external identifiers when legally permitted.
-Keep the application's canonical skill identity separate from any external taxonomy ID.
-
-# 117. EXTERNAL SOURCE MODEL
-If external data is introduced, create a source field or source entity.
-Store external_id.
-Store source_name.
-Store imported_at.
-Store source_version where available.
-Never assume external identifiers are globally unique across providers.
-
-# 118. IMPORT PIPELINE
-Validate imported records.
-Normalize names.
-Resolve aliases.
-Upsert reference data.
-Record import statistics.
-Record failures.
-Keep imports idempotent.
-
-# 119. IMPORT AUDIT
-Record import run ID.
-Record source.
-Record counts.
-Record inserted.
-Record updated.
-Record skipped.
-Record failed.
-
-# 120. FINAL IMPLEMENTATION INSTRUCTION
-Now implement the database completely.
-First inspect the existing repository structure.
-Do not overwrite working code without understanding it.
-Identify the existing PostgreSQL and Prisma configuration.
-Identify existing migrations.
-Reuse compatible existing models.
-Create missing models.
-Resolve naming conflicts carefully.
-Run Prisma validation.
-Run migrations.
-Run seed.
-Run tests.
-Fix all integrity failures.
-Document the final schema.
-Provide an ERD.
-Provide sample queries.
-Provide seed statistics.
-Provide migration instructions.
-Provide a final database implementation report.
-
-# 121. AI AGENT EXECUTION PROTOCOL
-Phase 1 — Repository inspection.
-Phase 2 — Existing database discovery.
-Phase 3 — Domain model confirmation.
-Phase 4 — Prisma schema implementation.
-Phase 5 — Migration generation.
-Phase 6 — Seed data implementation.
-Phase 7 — Integrity tests.
-Phase 8 — Backend integration.
-Phase 9 — Performance review.
-Phase 10 — Security review.
-Phase 11 — Documentation.
-Phase 12 — Final verification.
-
-# 122. INSPECTION COMMANDS
-Inspect package.json.
-Inspect prisma/schema.prisma.
-Inspect prisma/migrations.
-Inspect .env.example.
-Inspect backend database utilities.
-Inspect API DTOs.
-Inspect existing tests.
-Inspect existing seed scripts.
-Do not assume files exist.
-
-# 123. SCHEMA REVIEW QUESTIONS
-Can every candidate have exactly one active profile?
-Can a candidate have multiple resumes?
-Can a resume have multiple versions?
-Can a skill have multiple aliases?
-Can a candidate have the same skill twice?
-Can a job require the same skill twice?
-Can a match be traced to a specific analysis?
-Can a historical match be explained?
-Can a skill gap point to a canonical skill?
-Can a recommendation be traced to its source?
-
-# 124. INTEGRITY REVIEW
-Check orphan records.
-Check duplicate business keys.
-Check invalid score values.
-Check invalid dates.
-Check negative quantities.
-Check inactive skill usage.
-Check broken analysis references.
-Check duplicate aliases.
-Check duplicate matches where uniqueness is expected.
-
-# 125. MATCH UNIQUENESS
-Decide whether multiple match records for the same candidate-job pair are required.
-If historical evaluations are required, uniqueness should include analysis_run_id or a version.
-If only current match is required, enforce candidate_id + job_id uniqueness and retain history elsewhere.
-Document the choice.
-
-# 126. CURRENT VS HISTORICAL DATA
-Current candidate skills may represent the latest profile.
-Historical analysis results should remain traceable.
-Do not confuse current state with historical state.
-Use analysis runs and version identifiers for historical state.
-
-# 127. SCORE PRECISION
-Choose a consistent numeric precision for scores.
-Document whether scores are 0–1 or 0–100.
-The frontend must not guess the scale.
-Use one canonical internal representation.
-Convert for display only at the UI boundary.
-
-# 128. CONFIDENCE VS SCORE
-Match score measures relevance.
-AI confidence measures certainty of extraction or classification.
-Skill proficiency measures candidate capability.
-These three concepts must remain separate.
-
-# 129. JOB REQUIREMENT WEIGHTS
-Required skills should have higher influence than preferred skills.
-Store explicit importance where scoring needs it.
-Avoid hard-coded skill weights in multiple services.
-Prefer a centralized scoring configuration.
-
-# 130. SCORING CONFIGURATION
-If persisted, scoring configuration should include:
-semantic_weight.
-skill_weight.
-experience_weight.
-education_weight.
-required_skill_penalty.
-preferred_skill_bonus.
-configuration_version.
-
-Never store secret information here.
-
-# 131. MODEL OUTPUT SNAPSHOT
-For important AI outputs, preserve the structured result or hash.
-Do not depend solely on the current model to recreate old extraction results.
-If storage policy allows, keep a compact structured snapshot.
-
-# 132. RESUME TEXT STORAGE
-If raw extracted text is stored, define access controls.
-Avoid returning it to the frontend by default.
-Prefer references and derived fields for dashboard responses.
-
-# 133. DATABASE SEED CONTRACT
-Seed script must be repeatable.
-Running seed twice must not create uncontrolled duplicates.
-Use upsert or deterministic IDs.
-Seed ordering should respect foreign keys.
-
-# 134. SEED ORDER
-1. Categories.
-2. Skills.
-3. Aliases.
-4. Career paths.
-5. Career-path skills.
-6. Jobs.
-7. Job skills.
-8. Demo user.
-9. Demo candidate profile.
-10. Demo candidate skills.
-11. Optional demo analysis/match records.
-
-# 135. DEMO DATA POLICY
-Demo data must be synthetic.
-Do not use real candidate resumes.
-Do not use real private email addresses.
-Do not expose real API keys.
-
-# 136. DATABASE DOCUMENTATION
-README must contain setup.
-README must contain schema overview.
-README must contain entity descriptions.
-README must contain migration steps.
-README must contain seed steps.
-README must contain test steps.
-README must contain troubleshooting.
-
-# 137. TROUBLESHOOTING
-If PostgreSQL is unreachable, verify DATABASE_URL and server availability.
-If Prisma cannot connect, verify credentials, host, port, and database name.
-If migration fails, inspect migration SQL and current schema.
-If seed fails, inspect foreign-key order.
-If duplicate errors occur, verify idempotent seed logic.
-If slow queries occur, inspect EXPLAIN ANALYZE.
-
-# 138. BACKEND HANDOFF
-Give backend developers the final model names.
-Give backend developers API-safe field names.
-Give backend developers ownership rules.
-Give backend developers transaction boundaries.
-Give backend developers seed credentials only through secure development configuration.
-
-# 139. AI HANDOFF
-Give the AI developer canonical skill IDs.
-Give the AI developer alias resolution API/contract.
-Give the AI developer candidate skill persistence contract.
-Give the AI developer analysis run contract.
-Give the AI developer model version contract.
-
-# 140. FRONTEND HANDOFF
-Give frontend developers response DTOs.
-Give frontend developers score scale.
-Give frontend developers match evidence structure.
-Give frontend developers skill-gap priority values.
-Give frontend developers roadmap stage structure.
-
-# 141. FINAL QUALITY GATE
-Do not call the database complete until all core migrations apply cleanly.
-Do not call the database complete until seed runs cleanly.
-Do not call the database complete until duplicate constraints are tested.
-Do not call the database complete until ownership rules are tested.
-Do not call the database complete until match evidence can be queried.
-Do not call the database complete until the frontend can retrieve candidate profile data through the backend.
-
-# 142. FINAL OUTPUT FORMAT FOR THE AI AGENT
-Return a final report with:
-1. Files created.
-2. Files modified.
-3. Database tables.
-4. Relationships.
-5. Constraints.
-6. Indexes.
-7. Seed counts.
-8. Migration status.
-9. Test results.
-10. Performance notes.
-11. Security notes.
-12. Known limitations.
-13. Recommended next steps.
-
-# 143. DETAILED ACCEPTANCE CHECKLIST
-CHECK-0001: Verify that the database requirement #1 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0002: Verify that the database requirement #2 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0003: Verify that the database requirement #3 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0004: Verify that the database requirement #4 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0005: Verify that the database requirement #5 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0006: Verify that the database requirement #6 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0007: Verify that the database requirement #7 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0008: Verify that the database requirement #8 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0009: Verify that the database requirement #9 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0010: Verify that the database requirement #10 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0011: Verify that the database requirement #11 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0012: Verify that the database requirement #12 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0013: Verify that the database requirement #13 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0014: Verify that the database requirement #14 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0015: Verify that the database requirement #15 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0016: Verify that the database requirement #16 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0017: Verify that the database requirement #17 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0018: Verify that the database requirement #18 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0019: Verify that the database requirement #19 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0020: Verify that the database requirement #20 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0021: Verify that the database requirement #21 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0022: Verify that the database requirement #22 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0023: Verify that the database requirement #23 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0024: Verify that the database requirement #24 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0025: Verify that the database requirement #25 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0026: Verify that the database requirement #26 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0027: Verify that the database requirement #27 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0028: Verify that the database requirement #28 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0029: Verify that the database requirement #29 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0030: Verify that the database requirement #30 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0031: Verify that the database requirement #31 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0032: Verify that the database requirement #32 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0033: Verify that the database requirement #33 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0034: Verify that the database requirement #34 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0035: Verify that the database requirement #35 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0036: Verify that the database requirement #36 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0037: Verify that the database requirement #37 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0038: Verify that the database requirement #38 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0039: Verify that the database requirement #39 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0040: Verify that the database requirement #40 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0041: Verify that the database requirement #41 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0042: Verify that the database requirement #42 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0043: Verify that the database requirement #43 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0044: Verify that the database requirement #44 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0045: Verify that the database requirement #45 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0046: Verify that the database requirement #46 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0047: Verify that the database requirement #47 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0048: Verify that the database requirement #48 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0049: Verify that the database requirement #49 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0050: Verify that the database requirement #50 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0051: Verify that the database requirement #51 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0052: Verify that the database requirement #52 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0053: Verify that the database requirement #53 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0054: Verify that the database requirement #54 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0055: Verify that the database requirement #55 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0056: Verify that the database requirement #56 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0057: Verify that the database requirement #57 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0058: Verify that the database requirement #58 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0059: Verify that the database requirement #59 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0060: Verify that the database requirement #60 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0061: Verify that the database requirement #61 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0062: Verify that the database requirement #62 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0063: Verify that the database requirement #63 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0064: Verify that the database requirement #64 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0065: Verify that the database requirement #65 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0066: Verify that the database requirement #66 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0067: Verify that the database requirement #67 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0068: Verify that the database requirement #68 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0069: Verify that the database requirement #69 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0070: Verify that the database requirement #70 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0071: Verify that the database requirement #71 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0072: Verify that the database requirement #72 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0073: Verify that the database requirement #73 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0074: Verify that the database requirement #74 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0075: Verify that the database requirement #75 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0076: Verify that the database requirement #76 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0077: Verify that the database requirement #77 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0078: Verify that the database requirement #78 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0079: Verify that the database requirement #79 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0080: Verify that the database requirement #80 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0081: Verify that the database requirement #81 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0082: Verify that the database requirement #82 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0083: Verify that the database requirement #83 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0084: Verify that the database requirement #84 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0085: Verify that the database requirement #85 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0086: Verify that the database requirement #86 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0087: Verify that the database requirement #87 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0088: Verify that the database requirement #88 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0089: Verify that the database requirement #89 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0090: Verify that the database requirement #90 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0091: Verify that the database requirement #91 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0092: Verify that the database requirement #92 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0093: Verify that the database requirement #93 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0094: Verify that the database requirement #94 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0095: Verify that the database requirement #95 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0096: Verify that the database requirement #96 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0097: Verify that the database requirement #97 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0098: Verify that the database requirement #98 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0099: Verify that the database requirement #99 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0100: Verify that the database requirement #100 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0101: Verify that the database requirement #101 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0102: Verify that the database requirement #102 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0103: Verify that the database requirement #103 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0104: Verify that the database requirement #104 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0105: Verify that the database requirement #105 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0106: Verify that the database requirement #106 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0107: Verify that the database requirement #107 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0108: Verify that the database requirement #108 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0109: Verify that the database requirement #109 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0110: Verify that the database requirement #110 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0111: Verify that the database requirement #111 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0112: Verify that the database requirement #112 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0113: Verify that the database requirement #113 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0114: Verify that the database requirement #114 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0115: Verify that the database requirement #115 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0116: Verify that the database requirement #116 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0117: Verify that the database requirement #117 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0118: Verify that the database requirement #118 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0119: Verify that the database requirement #119 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0120: Verify that the database requirement #120 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0121: Verify that the database requirement #121 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0122: Verify that the database requirement #122 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0123: Verify that the database requirement #123 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0124: Verify that the database requirement #124 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0125: Verify that the database requirement #125 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0126: Verify that the database requirement #126 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0127: Verify that the database requirement #127 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0128: Verify that the database requirement #128 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0129: Verify that the database requirement #129 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0130: Verify that the database requirement #130 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0131: Verify that the database requirement #131 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0132: Verify that the database requirement #132 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0133: Verify that the database requirement #133 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0134: Verify that the database requirement #134 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0135: Verify that the database requirement #135 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0136: Verify that the database requirement #136 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0137: Verify that the database requirement #137 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0138: Verify that the database requirement #138 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0139: Verify that the database requirement #139 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0140: Verify that the database requirement #140 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0141: Verify that the database requirement #141 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0142: Verify that the database requirement #142 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0143: Verify that the database requirement #143 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0144: Verify that the database requirement #144 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0145: Verify that the database requirement #145 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0146: Verify that the database requirement #146 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0147: Verify that the database requirement #147 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0148: Verify that the database requirement #148 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0149: Verify that the database requirement #149 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0150: Verify that the database requirement #150 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0151: Verify that the database requirement #151 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0152: Verify that the database requirement #152 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0153: Verify that the database requirement #153 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0154: Verify that the database requirement #154 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0155: Verify that the database requirement #155 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0156: Verify that the database requirement #156 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0157: Verify that the database requirement #157 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0158: Verify that the database requirement #158 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0159: Verify that the database requirement #159 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0160: Verify that the database requirement #160 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0161: Verify that the database requirement #161 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0162: Verify that the database requirement #162 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0163: Verify that the database requirement #163 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0164: Verify that the database requirement #164 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0165: Verify that the database requirement #165 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0166: Verify that the database requirement #166 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0167: Verify that the database requirement #167 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0168: Verify that the database requirement #168 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0169: Verify that the database requirement #169 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0170: Verify that the database requirement #170 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0171: Verify that the database requirement #171 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0172: Verify that the database requirement #172 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0173: Verify that the database requirement #173 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0174: Verify that the database requirement #174 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0175: Verify that the database requirement #175 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0176: Verify that the database requirement #176 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0177: Verify that the database requirement #177 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0178: Verify that the database requirement #178 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0179: Verify that the database requirement #179 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0180: Verify that the database requirement #180 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0181: Verify that the database requirement #181 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0182: Verify that the database requirement #182 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0183: Verify that the database requirement #183 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0184: Verify that the database requirement #184 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0185: Verify that the database requirement #185 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0186: Verify that the database requirement #186 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0187: Verify that the database requirement #187 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0188: Verify that the database requirement #188 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0189: Verify that the database requirement #189 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0190: Verify that the database requirement #190 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0191: Verify that the database requirement #191 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0192: Verify that the database requirement #192 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0193: Verify that the database requirement #193 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0194: Verify that the database requirement #194 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0195: Verify that the database requirement #195 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0196: Verify that the database requirement #196 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0197: Verify that the database requirement #197 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0198: Verify that the database requirement #198 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0199: Verify that the database requirement #199 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0200: Verify that the database requirement #200 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0201: Verify that the database requirement #201 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0202: Verify that the database requirement #202 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0203: Verify that the database requirement #203 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0204: Verify that the database requirement #204 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0205: Verify that the database requirement #205 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0206: Verify that the database requirement #206 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0207: Verify that the database requirement #207 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0208: Verify that the database requirement #208 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0209: Verify that the database requirement #209 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0210: Verify that the database requirement #210 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0211: Verify that the database requirement #211 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0212: Verify that the database requirement #212 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0213: Verify that the database requirement #213 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0214: Verify that the database requirement #214 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0215: Verify that the database requirement #215 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0216: Verify that the database requirement #216 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0217: Verify that the database requirement #217 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0218: Verify that the database requirement #218 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0219: Verify that the database requirement #219 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0220: Verify that the database requirement #220 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0221: Verify that the database requirement #221 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0222: Verify that the database requirement #222 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0223: Verify that the database requirement #223 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0224: Verify that the database requirement #224 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0225: Verify that the database requirement #225 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0226: Verify that the database requirement #226 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0227: Verify that the database requirement #227 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0228: Verify that the database requirement #228 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0229: Verify that the database requirement #229 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0230: Verify that the database requirement #230 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0231: Verify that the database requirement #231 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0232: Verify that the database requirement #232 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0233: Verify that the database requirement #233 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0234: Verify that the database requirement #234 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0235: Verify that the database requirement #235 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0236: Verify that the database requirement #236 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0237: Verify that the database requirement #237 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0238: Verify that the database requirement #238 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0239: Verify that the database requirement #239 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0240: Verify that the database requirement #240 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0241: Verify that the database requirement #241 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0242: Verify that the database requirement #242 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0243: Verify that the database requirement #243 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0244: Verify that the database requirement #244 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0245: Verify that the database requirement #245 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0246: Verify that the database requirement #246 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0247: Verify that the database requirement #247 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0248: Verify that the database requirement #248 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0249: Verify that the database requirement #249 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0250: Verify that the database requirement #250 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0251: Verify that the database requirement #251 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0252: Verify that the database requirement #252 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0253: Verify that the database requirement #253 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0254: Verify that the database requirement #254 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0255: Verify that the database requirement #255 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0256: Verify that the database requirement #256 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0257: Verify that the database requirement #257 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0258: Verify that the database requirement #258 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0259: Verify that the database requirement #259 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0260: Verify that the database requirement #260 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0261: Verify that the database requirement #261 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0262: Verify that the database requirement #262 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0263: Verify that the database requirement #263 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0264: Verify that the database requirement #264 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0265: Verify that the database requirement #265 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0266: Verify that the database requirement #266 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0267: Verify that the database requirement #267 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0268: Verify that the database requirement #268 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0269: Verify that the database requirement #269 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0270: Verify that the database requirement #270 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0271: Verify that the database requirement #271 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0272: Verify that the database requirement #272 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0273: Verify that the database requirement #273 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0274: Verify that the database requirement #274 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0275: Verify that the database requirement #275 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0276: Verify that the database requirement #276 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0277: Verify that the database requirement #277 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0278: Verify that the database requirement #278 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0279: Verify that the database requirement #279 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0280: Verify that the database requirement #280 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0281: Verify that the database requirement #281 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0282: Verify that the database requirement #282 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0283: Verify that the database requirement #283 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0284: Verify that the database requirement #284 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0285: Verify that the database requirement #285 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0286: Verify that the database requirement #286 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0287: Verify that the database requirement #287 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0288: Verify that the database requirement #288 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0289: Verify that the database requirement #289 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0290: Verify that the database requirement #290 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0291: Verify that the database requirement #291 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0292: Verify that the database requirement #292 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0293: Verify that the database requirement #293 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0294: Verify that the database requirement #294 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0295: Verify that the database requirement #295 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0296: Verify that the database requirement #296 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0297: Verify that the database requirement #297 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0298: Verify that the database requirement #298 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0299: Verify that the database requirement #299 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-CHECK-0300: Verify that the database requirement #300 is documented, implemented where applicable, and covered by validation or an explicit reason for exclusion.
-
-# 144. INDUSTRIAL REVIEW PROMPT
-Review the completed database as if you are a principal PostgreSQL architect conducting a production readiness review.
-Find normalization problems.
-Find missing foreign keys.
-Find missing unique constraints.
-Find dangerous cascade deletes.
-Find missing indexes.
-Find unnecessary indexes.
-Find sensitive-data exposure.
-Find ambiguous ownership.
-Find non-idempotent seed behavior.
-Find historical reproducibility gaps.
-Find score precision inconsistencies.
-Find AI provenance gaps.
-Find migration hazards.
-Find N+1 query risks.
-Find JSONB overuse.
-Find naming inconsistencies.
-Find undocumented assumptions.
-Fix issues that are safe to fix automatically.
-Report issues that require product decisions.
-
-# 145. FINAL COMMAND
-Build the database layer now.
-Do not stop at schema generation.
-Implement migrations, seed data, constraints, indexes, tests, documentation, and integration contracts.
-Use PostgreSQL + Prisma.
-Keep the design industrial-grade but practical for the current 15-hour hackathon.
-Prioritize correctness, security, explainability, reproducibility, and integration readiness.
-Do not add unnecessary infrastructure.
-Finish with a concise implementation report and exact commands required to run the database locally.
-
-# 146.1 SPECIALIZED DATABASE REVIEW MODULE
-Module 1: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.2 SPECIALIZED DATABASE REVIEW MODULE
-Module 2: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.3 SPECIALIZED DATABASE REVIEW MODULE
-Module 3: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.4 SPECIALIZED DATABASE REVIEW MODULE
-Module 4: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.5 SPECIALIZED DATABASE REVIEW MODULE
-Module 5: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.6 SPECIALIZED DATABASE REVIEW MODULE
-Module 6: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.7 SPECIALIZED DATABASE REVIEW MODULE
-Module 7: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.8 SPECIALIZED DATABASE REVIEW MODULE
-Module 8: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.9 SPECIALIZED DATABASE REVIEW MODULE
-Module 9: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.10 SPECIALIZED DATABASE REVIEW MODULE
-Module 10: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.11 SPECIALIZED DATABASE REVIEW MODULE
-Module 11: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.12 SPECIALIZED DATABASE REVIEW MODULE
-Module 12: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.13 SPECIALIZED DATABASE REVIEW MODULE
-Module 13: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.14 SPECIALIZED DATABASE REVIEW MODULE
-Module 14: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.15 SPECIALIZED DATABASE REVIEW MODULE
-Module 15: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.16 SPECIALIZED DATABASE REVIEW MODULE
-Module 16: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.17 SPECIALIZED DATABASE REVIEW MODULE
-Module 17: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.18 SPECIALIZED DATABASE REVIEW MODULE
-Module 18: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.19 SPECIALIZED DATABASE REVIEW MODULE
-Module 19: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.20 SPECIALIZED DATABASE REVIEW MODULE
-Module 20: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.21 SPECIALIZED DATABASE REVIEW MODULE
-Module 21: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.22 SPECIALIZED DATABASE REVIEW MODULE
-Module 22: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.23 SPECIALIZED DATABASE REVIEW MODULE
-Module 23: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.24 SPECIALIZED DATABASE REVIEW MODULE
-Module 24: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.25 SPECIALIZED DATABASE REVIEW MODULE
-Module 25: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.26 SPECIALIZED DATABASE REVIEW MODULE
-Module 26: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.27 SPECIALIZED DATABASE REVIEW MODULE
-Module 27: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.28 SPECIALIZED DATABASE REVIEW MODULE
-Module 28: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.29 SPECIALIZED DATABASE REVIEW MODULE
-Module 29: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-# 146.30 SPECIALIZED DATABASE REVIEW MODULE
-Module 30: Review entity boundaries, keys, relationships, indexes, lifecycle, privacy, and API integration.
-Ask whether this domain object should be relational, reference data, derived data, or JSON metadata.
-Ask whether ownership is explicit.
-Ask whether duplicate records can be created by retries.
-Ask whether historical state can be reconstructed.
-Ask whether the UI can retrieve the required data without direct database access.
-Ask whether the model can evolve without destructive migration.
-Ask whether the table has a clear business owner.
-Ask whether every foreign key has an intentional delete action.
-Ask whether high-cardinality queries are indexed.
-Ask whether an AI-generated field has provenance.
-Ask whether the field should be nullable or required.
-Ask whether the field has a documented unit and scale.
-Ask whether sensitive data is minimized.
-Ask whether seed data is deterministic.
-Ask whether test data can exercise failure cases.
-Ask whether the table can grow indefinitely and whether retention is needed.
-Ask whether the design supports the current MVP without blocking future production evolution.
-
-
-# 147. IMPLEMENTATION TASK MATRIX
-DB-TASK-2561: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2562: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2563: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2564: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2565: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2566: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2567: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2568: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2569: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2570: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2571: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2572: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2573: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2574: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2575: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2576: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2577: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2578: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2579: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2580: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2581: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2582: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2583: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2584: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2585: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2586: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2587: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2588: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2589: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2590: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2591: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2592: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2593: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2594: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2595: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2596: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2597: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2598: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2599: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2600: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2601: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2602: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2603: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2604: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2605: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2606: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2607: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2608: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2609: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2610: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2611: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2612: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2613: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2614: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2615: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2616: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2617: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2618: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2619: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2620: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2621: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2622: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2623: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2624: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2625: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2626: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2627: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2628: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2629: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2630: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2631: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2632: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2633: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2634: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2635: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2636: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2637: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2638: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2639: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2640: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2641: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2642: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2643: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2644: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2645: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2646: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2647: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2648: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2649: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2650: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2651: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2652: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2653: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2654: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2655: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2656: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2657: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2658: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2659: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2660: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2661: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2662: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2663: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2664: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2665: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2666: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2667: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2668: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2669: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2670: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2671: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2672: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2673: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2674: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2675: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2676: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2677: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2678: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2679: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2680: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2681: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2682: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2683: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2684: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2685: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2686: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2687: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2688: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2689: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2690: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2691: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2692: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2693: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2694: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2695: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2696: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2697: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2698: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2699: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2700: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2701: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2702: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2703: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2704: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2705: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2706: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2707: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2708: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2709: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2710: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2711: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2712: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2713: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2714: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2715: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2716: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2717: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2718: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2719: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2720: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2721: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2722: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2723: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2724: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2725: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2726: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2727: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2728: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2729: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2730: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2731: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2732: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2733: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2734: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2735: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2736: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2737: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2738: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2739: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2740: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2741: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2742: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2743: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2744: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2745: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2746: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2747: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2748: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2749: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2750: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2751: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2752: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2753: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2754: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2755: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2756: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2757: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2758: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2759: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2760: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2761: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2762: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2763: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2764: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2765: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2766: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2767: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2768: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2769: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2770: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2771: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2772: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2773: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2774: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2775: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2776: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2777: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2778: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2779: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2780: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2781: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2782: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2783: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2784: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2785: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2786: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2787: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2788: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2789: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2790: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2791: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2792: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2793: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2794: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2795: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2796: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2797: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2798: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2799: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2800: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2801: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2802: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2803: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2804: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2805: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2806: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2807: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2808: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2809: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2810: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2811: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2812: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2813: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2814: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2815: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2816: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2817: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2818: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2819: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2820: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2821: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2822: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2823: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2824: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2825: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2826: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2827: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2828: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2829: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2830: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2831: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2832: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2833: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2834: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2835: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2836: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2837: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2838: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2839: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2840: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2841: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2842: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2843: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2844: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2845: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2846: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2847: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2848: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2849: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2850: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2851: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2852: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2853: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2854: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2855: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2856: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2857: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2858: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2859: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2860: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2861: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2862: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2863: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2864: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2865: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2866: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2867: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2868: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2869: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2870: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2871: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2872: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2873: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2874: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2875: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2876: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2877: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2878: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2879: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2880: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2881: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2882: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2883: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2884: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2885: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2886: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2887: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2888: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2889: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2890: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2891: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2892: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2893: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2894: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2895: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2896: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2897: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2898: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2899: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2900: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2901: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2902: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2903: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2904: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2905: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2906: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2907: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2908: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2909: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2910: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2911: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2912: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2913: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2914: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2915: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2916: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2917: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2918: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2919: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2920: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2921: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2922: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2923: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2924: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2925: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2926: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2927: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2928: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2929: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2930: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2931: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2932: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2933: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2934: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2935: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2936: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2937: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2938: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2939: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2940: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2941: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2942: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2943: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2944: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2945: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2946: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2947: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2948: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2949: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2950: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2951: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2952: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2953: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2954: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2955: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2956: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2957: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2958: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2959: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2960: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2961: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2962: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2963: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2964: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2965: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2966: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2967: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2968: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2969: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2970: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2971: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2972: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2973: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2974: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2975: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2976: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2977: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2978: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2979: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2980: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2981: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2982: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2983: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2984: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2985: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2986: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2987: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2988: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2989: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2990: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2991: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2992: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2993: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2994: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2995: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2996: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2997: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2998: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-2999: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3000: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3001: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3002: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3003: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3004: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3005: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3006: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3007: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3008: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3009: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3010: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3011: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3012: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3013: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3014: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3015: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3016: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3017: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3018: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3019: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3020: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3021: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3022: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3023: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3024: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3025: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3026: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3027: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3028: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3029: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3030: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3031: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3032: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3033: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3034: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3035: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3036: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3037: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3038: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3039: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3040: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3041: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3042: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3043: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3044: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3045: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3046: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3047: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3048: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3049: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3050: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3051: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3052: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3053: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3054: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3055: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3056: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3057: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3058: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3059: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3060: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3061: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3062: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3063: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3064: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3065: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3066: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3067: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3068: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3069: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3070: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3071: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3072: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3073: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3074: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3075: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3076: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3077: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3078: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3079: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3080: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3081: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3082: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3083: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3084: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3085: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3086: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3087: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3088: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3089: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3090: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3091: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3092: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3093: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3094: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3095: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3096: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3097: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3098: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3099: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3100: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3101: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3102: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3103: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3104: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3105: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3106: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3107: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3108: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3109: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3110: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3111: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3112: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3113: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3114: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3115: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3116: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3117: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3118: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3119: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3120: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3121: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3122: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3123: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3124: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3125: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3126: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3127: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3128: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3129: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3130: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3131: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3132: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3133: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3134: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3135: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3136: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3137: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3138: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3139: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3140: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3141: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3142: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3143: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3144: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3145: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3146: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3147: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3148: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3149: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3150: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3151: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3152: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3153: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3154: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3155: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3156: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3157: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3158: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3159: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3160: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3161: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3162: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3163: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3164: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3165: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3166: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3167: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3168: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3169: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3170: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3171: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3172: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3173: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3174: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3175: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3176: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3177: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3178: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3179: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3180: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3181: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3182: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3183: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3184: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3185: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3186: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3187: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3188: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3189: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3190: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3191: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3192: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3193: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3194: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3195: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3196: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3197: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3198: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3199: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3200: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3201: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3202: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3203: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3204: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3205: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3206: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3207: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3208: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3209: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3210: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3211: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3212: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3213: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3214: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3215: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3216: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3217: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3218: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3219: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3220: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3221: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3222: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3223: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3224: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3225: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3226: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3227: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3228: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3229: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3230: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3231: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3232: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3233: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3234: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3235: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3236: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3237: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3238: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3239: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3240: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3241: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3242: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3243: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3244: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3245: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3246: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3247: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3248: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3249: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3250: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3251: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3252: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3253: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3254: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3255: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3256: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3257: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3258: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3259: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3260: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3261: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3262: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3263: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3264: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3265: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3266: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3267: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3268: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3269: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3270: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3271: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3272: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3273: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3274: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3275: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3276: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3277: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3278: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3279: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3280: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3281: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3282: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3283: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3284: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3285: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3286: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3287: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3288: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3289: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3290: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3291: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3292: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3293: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3294: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3295: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3296: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3297: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3298: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3299: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3300: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3301: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3302: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3303: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3304: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3305: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3306: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3307: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3308: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3309: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3310: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3311: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3312: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3313: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3314: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3315: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3316: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3317: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3318: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3319: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3320: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3321: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3322: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3323: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3324: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3325: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3326: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3327: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3328: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3329: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3330: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3331: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3332: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3333: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3334: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3335: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3336: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3337: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3338: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3339: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3340: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3341: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3342: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3343: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3344: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3345: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3346: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3347: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3348: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3349: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3350: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3351: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3352: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3353: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3354: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3355: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3356: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3357: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3358: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3359: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3360: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3361: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3362: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3363: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3364: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3365: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3366: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3367: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3368: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3369: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3370: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3371: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3372: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3373: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3374: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3375: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3376: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3377: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3378: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3379: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3380: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3381: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3382: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3383: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3384: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3385: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3386: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3387: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3388: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3389: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3390: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3391: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3392: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3393: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3394: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3395: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3396: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3397: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3398: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3399: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3400: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3401: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3402: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3403: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3404: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3405: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3406: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3407: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3408: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3409: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3410: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3411: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3412: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3413: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3414: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3415: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3416: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3417: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3418: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3419: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3420: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3421: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3422: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3423: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3424: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3425: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3426: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3427: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3428: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3429: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3430: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3431: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3432: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3433: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3434: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3435: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3436: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3437: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3438: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3439: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3440: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3441: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3442: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3443: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3444: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3445: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3446: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3447: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3448: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3449: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3450: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3451: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3452: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3453: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3454: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3455: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3456: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3457: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3458: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3459: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3460: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3461: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3462: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3463: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3464: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3465: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3466: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3467: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3468: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3469: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3470: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3471: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3472: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3473: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3474: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3475: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3476: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3477: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3478: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3479: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3480: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3481: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3482: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3483: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3484: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3485: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3486: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3487: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3488: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3489: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3490: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3491: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3492: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3493: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3494: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3495: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3496: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3497: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3498: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3499: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3500: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3501: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3502: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3503: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3504: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3505: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3506: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3507: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3508: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3509: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3510: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3511: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3512: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3513: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3514: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3515: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3516: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3517: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3518: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3519: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3520: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3521: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3522: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3523: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3524: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3525: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3526: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3527: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3528: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3529: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3530: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3531: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3532: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3533: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3534: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3535: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3536: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3537: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3538: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3539: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3540: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3541: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3542: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3543: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3544: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3545: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3546: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3547: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3548: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3549: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3550: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3551: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3552: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3553: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3554: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3555: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3556: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3557: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3558: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3559: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3560: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3561: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3562: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3563: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3564: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3565: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3566: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3567: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3568: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3569: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3570: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3571: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3572: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3573: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3574: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3575: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3576: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3577: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3578: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3579: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3580: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3581: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3582: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3583: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3584: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3585: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3586: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3587: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3588: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3589: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3590: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3591: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3592: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3593: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3594: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3595: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3596: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3597: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3598: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3599: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
-DB-TASK-3600: Validate one concrete aspect of the PostgreSQL + Prisma implementation, record the result, and fix it if it violates the architecture, integrity, security, performance, privacy, reproducibility, or integration requirements defined above.
+# DATA LAYER MASTER PROMPT — FILE-BASED ANALYTICS ARCHITECTURE
+
+## MASTER INSTRUCTION
+You are the data engineering lead responsible for a clean, reproducible, transparent data layer.
+
+This document is an implementation contract, review checklist, and AI coding prompt.
+The implementer must follow the source-grounded constraints and must not invent unsupported facts.
+
+## SOURCE-GROUNDED PROJECT CONTEXT
+- Treat the organizer-provided datasets and problem-context materials as the primary source of truth.
+- Do not silently invent a dataset column, target, metric, business fact, or finding.
+- Verify exact column names from the actual files before implementing dependent code.
+- Preserve the distinction between source facts, computed results, model predictions, and recommendations.
+- Do not claim causation when the available observational data supports only association or prediction.
+- Keep the four organizer datasets separate until a defensible analytical linkage is established.
+- Preserve raw organizer data unchanged.
+- Write reproducible transformations into scripts rather than applying hidden manual edits.
+- Record important data-quality decisions.
+- Treat missingness as an analytical issue, not merely a cleaning inconvenience.
+- Investigate duplicates before deleting them.
+- Investigate outliers before removing them.
+- Normalize text only when the normalization rule is justified.
+- Do not leak target information into predictors.
+- Use train/test separation or cross-validation appropriate to the sample size.
+- Use simple interpretable baselines before complex models.
+- Report limitations with every important analytical conclusion.
+- Use dashboard visuals to answer questions rather than decorate the interface.
+- Make every recommendation traceable to evidence.
+- Keep the hackathon implementation feasible within the available time.
+
+## DOMAIN FOCUS
+- Use organizer files as immutable source data.
+- Prefer a file-based analytical architecture for the hackathon MVP.
+- Use data/raw for source files and data/processed for generated outputs.
+- Do not add PostgreSQL or Prisma unless a concrete requirement appears.
+- Create reproducible data-preparation scripts.
+- Maintain data lineage.
+- Validate schema and quality before analysis.
+- Keep processed artifacts clearly named.
+- Respect organizer restrictions on data transfer and publication.
+- Make the data layer easy for the analytics team to consume.
+
+## 1. Data-layer objective
+2. Define the purpose of the Data-layer objective component before implementation.
+3. Keep Data-layer objective aligned with the organizer-data-driven career-intelligence objective.
+4. Use actual inspected data and frozen contracts as the source for Data-layer objective.
+5. Document inputs, transformations, outputs, and ownership for Data-layer objective.
+6. Validate assumptions used by Data-layer objective before relying on them.
+7. Handle missing, invalid, empty, or unexpected inputs in Data-layer objective explicitly.
+8. Keep Data-layer objective reproducible and reviewable by another team member.
+9. Do not add unnecessary infrastructure to solve a Data-layer objective requirement.
+10. Record important limitations and failure modes for Data-layer objective.
+11. Define a clear acceptance condition for Data-layer objective.
+12. Confirm the owner responsible for Data-layer objective.
+13. Confirm the dependency order for Data-layer objective.
+14. Confirm the expected artifact or response produced by Data-layer objective.
+15. Confirm the validation method used for Data-layer objective.
+16. Confirm that Data-layer objective cannot silently alter raw organizer data.
+17. Confirm that errors in Data-layer objective are observable during integration.
+18. Confirm that Data-layer objective can be demonstrated within the hackathon time budget.
+19. Confirm that Data-layer objective supports the Round 2 evidence story where relevant.
+20. Confirm that Data-layer objective does not create unsupported causal claims.
+21. Confirm that Data-layer objective is covered by the final release checklist.
+## 22. Repository structure
+23. Define the purpose of the Repository structure component before implementation.
+24. Keep Repository structure aligned with the organizer-data-driven career-intelligence objective.
+25. Use actual inspected data and frozen contracts as the source for Repository structure.
+26. Document inputs, transformations, outputs, and ownership for Repository structure.
+27. Validate assumptions used by Repository structure before relying on them.
+28. Handle missing, invalid, empty, or unexpected inputs in Repository structure explicitly.
+29. Keep Repository structure reproducible and reviewable by another team member.
+30. Do not add unnecessary infrastructure to solve a Repository structure requirement.
+31. Record important limitations and failure modes for Repository structure.
+32. Define a clear acceptance condition for Repository structure.
+33. Confirm the owner responsible for Repository structure.
+34. Confirm the dependency order for Repository structure.
+35. Confirm the expected artifact or response produced by Repository structure.
+36. Confirm the validation method used for Repository structure.
+37. Confirm that Repository structure cannot silently alter raw organizer data.
+38. Confirm that errors in Repository structure are observable during integration.
+39. Confirm that Repository structure can be demonstrated within the hackathon time budget.
+40. Confirm that Repository structure supports the Round 2 evidence story where relevant.
+41. Confirm that Repository structure does not create unsupported causal claims.
+42. Confirm that Repository structure is covered by the final release checklist.
+## 43. Raw directory
+44. Define the purpose of the Raw directory component before implementation.
+45. Keep Raw directory aligned with the organizer-data-driven career-intelligence objective.
+46. Use actual inspected data and frozen contracts as the source for Raw directory.
+47. Document inputs, transformations, outputs, and ownership for Raw directory.
+48. Validate assumptions used by Raw directory before relying on them.
+49. Handle missing, invalid, empty, or unexpected inputs in Raw directory explicitly.
+50. Keep Raw directory reproducible and reviewable by another team member.
+51. Do not add unnecessary infrastructure to solve a Raw directory requirement.
+52. Record important limitations and failure modes for Raw directory.
+53. Define a clear acceptance condition for Raw directory.
+54. Confirm the owner responsible for Raw directory.
+55. Confirm the dependency order for Raw directory.
+56. Confirm the expected artifact or response produced by Raw directory.
+57. Confirm the validation method used for Raw directory.
+58. Confirm that Raw directory cannot silently alter raw organizer data.
+59. Confirm that errors in Raw directory are observable during integration.
+60. Confirm that Raw directory can be demonstrated within the hackathon time budget.
+61. Confirm that Raw directory supports the Round 2 evidence story where relevant.
+62. Confirm that Raw directory does not create unsupported causal claims.
+63. Confirm that Raw directory is covered by the final release checklist.
+## 64. Processed directory
+65. Define the purpose of the Processed directory component before implementation.
+66. Keep Processed directory aligned with the organizer-data-driven career-intelligence objective.
+67. Use actual inspected data and frozen contracts as the source for Processed directory.
+68. Document inputs, transformations, outputs, and ownership for Processed directory.
+69. Validate assumptions used by Processed directory before relying on them.
+70. Handle missing, invalid, empty, or unexpected inputs in Processed directory explicitly.
+71. Keep Processed directory reproducible and reviewable by another team member.
+72. Do not add unnecessary infrastructure to solve a Processed directory requirement.
+73. Record important limitations and failure modes for Processed directory.
+74. Define a clear acceptance condition for Processed directory.
+75. Confirm the owner responsible for Processed directory.
+76. Confirm the dependency order for Processed directory.
+77. Confirm the expected artifact or response produced by Processed directory.
+78. Confirm the validation method used for Processed directory.
+79. Confirm that Processed directory cannot silently alter raw organizer data.
+80. Confirm that errors in Processed directory are observable during integration.
+81. Confirm that Processed directory can be demonstrated within the hackathon time budget.
+82. Confirm that Processed directory supports the Round 2 evidence story where relevant.
+83. Confirm that Processed directory does not create unsupported causal claims.
+84. Confirm that Processed directory is covered by the final release checklist.
+## 85. Dataset registry
+86. Define the purpose of the Dataset registry component before implementation.
+87. Keep Dataset registry aligned with the organizer-data-driven career-intelligence objective.
+88. Use actual inspected data and frozen contracts as the source for Dataset registry.
+89. Document inputs, transformations, outputs, and ownership for Dataset registry.
+90. Validate assumptions used by Dataset registry before relying on them.
+91. Handle missing, invalid, empty, or unexpected inputs in Dataset registry explicitly.
+92. Keep Dataset registry reproducible and reviewable by another team member.
+93. Do not add unnecessary infrastructure to solve a Dataset registry requirement.
+94. Record important limitations and failure modes for Dataset registry.
+95. Define a clear acceptance condition for Dataset registry.
+96. Confirm the owner responsible for Dataset registry.
+97. Confirm the dependency order for Dataset registry.
+98. Confirm the expected artifact or response produced by Dataset registry.
+99. Confirm the validation method used for Dataset registry.
+100. Confirm that Dataset registry cannot silently alter raw organizer data.
+101. Confirm that errors in Dataset registry are observable during integration.
+102. Confirm that Dataset registry can be demonstrated within the hackathon time budget.
+103. Confirm that Dataset registry supports the Round 2 evidence story where relevant.
+104. Confirm that Dataset registry does not create unsupported causal claims.
+105. Confirm that Dataset registry is covered by the final release checklist.
+## 106. File naming
+107. Define the purpose of the File naming component before implementation.
+108. Keep File naming aligned with the organizer-data-driven career-intelligence objective.
+109. Use actual inspected data and frozen contracts as the source for File naming.
+110. Document inputs, transformations, outputs, and ownership for File naming.
+111. Validate assumptions used by File naming before relying on them.
+112. Handle missing, invalid, empty, or unexpected inputs in File naming explicitly.
+113. Keep File naming reproducible and reviewable by another team member.
+114. Do not add unnecessary infrastructure to solve a File naming requirement.
+115. Record important limitations and failure modes for File naming.
+116. Define a clear acceptance condition for File naming.
+117. Confirm the owner responsible for File naming.
+118. Confirm the dependency order for File naming.
+119. Confirm the expected artifact or response produced by File naming.
+120. Confirm the validation method used for File naming.
+121. Confirm that File naming cannot silently alter raw organizer data.
+122. Confirm that errors in File naming are observable during integration.
+123. Confirm that File naming can be demonstrated within the hackathon time budget.
+124. Confirm that File naming supports the Round 2 evidence story where relevant.
+125. Confirm that File naming does not create unsupported causal claims.
+126. Confirm that File naming is covered by the final release checklist.
+## 127. CSV handling
+128. Define the purpose of the CSV handling component before implementation.
+129. Keep CSV handling aligned with the organizer-data-driven career-intelligence objective.
+130. Use actual inspected data and frozen contracts as the source for CSV handling.
+131. Document inputs, transformations, outputs, and ownership for CSV handling.
+132. Validate assumptions used by CSV handling before relying on them.
+133. Handle missing, invalid, empty, or unexpected inputs in CSV handling explicitly.
+134. Keep CSV handling reproducible and reviewable by another team member.
+135. Do not add unnecessary infrastructure to solve a CSV handling requirement.
+136. Record important limitations and failure modes for CSV handling.
+137. Define a clear acceptance condition for CSV handling.
+138. Confirm the owner responsible for CSV handling.
+139. Confirm the dependency order for CSV handling.
+140. Confirm the expected artifact or response produced by CSV handling.
+141. Confirm the validation method used for CSV handling.
+142. Confirm that CSV handling cannot silently alter raw organizer data.
+143. Confirm that errors in CSV handling are observable during integration.
+144. Confirm that CSV handling can be demonstrated within the hackathon time budget.
+145. Confirm that CSV handling supports the Round 2 evidence story where relevant.
+146. Confirm that CSV handling does not create unsupported causal claims.
+147. Confirm that CSV handling is covered by the final release checklist.
+## 148. Excel handling
+149. Define the purpose of the Excel handling component before implementation.
+150. Keep Excel handling aligned with the organizer-data-driven career-intelligence objective.
+151. Use actual inspected data and frozen contracts as the source for Excel handling.
+152. Document inputs, transformations, outputs, and ownership for Excel handling.
+153. Validate assumptions used by Excel handling before relying on them.
+154. Handle missing, invalid, empty, or unexpected inputs in Excel handling explicitly.
+155. Keep Excel handling reproducible and reviewable by another team member.
+156. Do not add unnecessary infrastructure to solve a Excel handling requirement.
+157. Record important limitations and failure modes for Excel handling.
+158. Define a clear acceptance condition for Excel handling.
+159. Confirm the owner responsible for Excel handling.
+160. Confirm the dependency order for Excel handling.
+161. Confirm the expected artifact or response produced by Excel handling.
+162. Confirm the validation method used for Excel handling.
+163. Confirm that Excel handling cannot silently alter raw organizer data.
+164. Confirm that errors in Excel handling are observable during integration.
+165. Confirm that Excel handling can be demonstrated within the hackathon time budget.
+166. Confirm that Excel handling supports the Round 2 evidence story where relevant.
+167. Confirm that Excel handling does not create unsupported causal claims.
+168. Confirm that Excel handling is covered by the final release checklist.
+## 169. Encoding
+170. Define the purpose of the Encoding component before implementation.
+171. Keep Encoding aligned with the organizer-data-driven career-intelligence objective.
+172. Use actual inspected data and frozen contracts as the source for Encoding.
+173. Document inputs, transformations, outputs, and ownership for Encoding.
+174. Validate assumptions used by Encoding before relying on them.
+175. Handle missing, invalid, empty, or unexpected inputs in Encoding explicitly.
+176. Keep Encoding reproducible and reviewable by another team member.
+177. Do not add unnecessary infrastructure to solve a Encoding requirement.
+178. Record important limitations and failure modes for Encoding.
+179. Define a clear acceptance condition for Encoding.
+180. Confirm the owner responsible for Encoding.
+181. Confirm the dependency order for Encoding.
+182. Confirm the expected artifact or response produced by Encoding.
+183. Confirm the validation method used for Encoding.
+184. Confirm that Encoding cannot silently alter raw organizer data.
+185. Confirm that errors in Encoding are observable during integration.
+186. Confirm that Encoding can be demonstrated within the hackathon time budget.
+187. Confirm that Encoding supports the Round 2 evidence story where relevant.
+188. Confirm that Encoding does not create unsupported causal claims.
+189. Confirm that Encoding is covered by the final release checklist.
+## 190. Delimiter detection
+191. Define the purpose of the Delimiter detection component before implementation.
+192. Keep Delimiter detection aligned with the organizer-data-driven career-intelligence objective.
+193. Use actual inspected data and frozen contracts as the source for Delimiter detection.
+194. Document inputs, transformations, outputs, and ownership for Delimiter detection.
+195. Validate assumptions used by Delimiter detection before relying on them.
+196. Handle missing, invalid, empty, or unexpected inputs in Delimiter detection explicitly.
+197. Keep Delimiter detection reproducible and reviewable by another team member.
+198. Do not add unnecessary infrastructure to solve a Delimiter detection requirement.
+199. Record important limitations and failure modes for Delimiter detection.
+200. Define a clear acceptance condition for Delimiter detection.
+201. Confirm the owner responsible for Delimiter detection.
+202. Confirm the dependency order for Delimiter detection.
+203. Confirm the expected artifact or response produced by Delimiter detection.
+204. Confirm the validation method used for Delimiter detection.
+205. Confirm that Delimiter detection cannot silently alter raw organizer data.
+206. Confirm that errors in Delimiter detection are observable during integration.
+207. Confirm that Delimiter detection can be demonstrated within the hackathon time budget.
+208. Confirm that Delimiter detection supports the Round 2 evidence story where relevant.
+209. Confirm that Delimiter detection does not create unsupported causal claims.
+210. Confirm that Delimiter detection is covered by the final release checklist.
+## 211. Schema discovery
+212. Define the purpose of the Schema discovery component before implementation.
+213. Keep Schema discovery aligned with the organizer-data-driven career-intelligence objective.
+214. Use actual inspected data and frozen contracts as the source for Schema discovery.
+215. Document inputs, transformations, outputs, and ownership for Schema discovery.
+216. Validate assumptions used by Schema discovery before relying on them.
+217. Handle missing, invalid, empty, or unexpected inputs in Schema discovery explicitly.
+218. Keep Schema discovery reproducible and reviewable by another team member.
+219. Do not add unnecessary infrastructure to solve a Schema discovery requirement.
+220. Record important limitations and failure modes for Schema discovery.
+221. Define a clear acceptance condition for Schema discovery.
+222. Confirm the owner responsible for Schema discovery.
+223. Confirm the dependency order for Schema discovery.
+224. Confirm the expected artifact or response produced by Schema discovery.
+225. Confirm the validation method used for Schema discovery.
+226. Confirm that Schema discovery cannot silently alter raw organizer data.
+227. Confirm that errors in Schema discovery are observable during integration.
+228. Confirm that Schema discovery can be demonstrated within the hackathon time budget.
+229. Confirm that Schema discovery supports the Round 2 evidence story where relevant.
+230. Confirm that Schema discovery does not create unsupported causal claims.
+231. Confirm that Schema discovery is covered by the final release checklist.
+## 232. Data types
+233. Define the purpose of the Data types component before implementation.
+234. Keep Data types aligned with the organizer-data-driven career-intelligence objective.
+235. Use actual inspected data and frozen contracts as the source for Data types.
+236. Document inputs, transformations, outputs, and ownership for Data types.
+237. Validate assumptions used by Data types before relying on them.
+238. Handle missing, invalid, empty, or unexpected inputs in Data types explicitly.
+239. Keep Data types reproducible and reviewable by another team member.
+240. Do not add unnecessary infrastructure to solve a Data types requirement.
+241. Record important limitations and failure modes for Data types.
+242. Define a clear acceptance condition for Data types.
+243. Confirm the owner responsible for Data types.
+244. Confirm the dependency order for Data types.
+245. Confirm the expected artifact or response produced by Data types.
+246. Confirm the validation method used for Data types.
+247. Confirm that Data types cannot silently alter raw organizer data.
+248. Confirm that errors in Data types are observable during integration.
+249. Confirm that Data types can be demonstrated within the hackathon time budget.
+250. Confirm that Data types supports the Round 2 evidence story where relevant.
+251. Confirm that Data types does not create unsupported causal claims.
+252. Confirm that Data types is covered by the final release checklist.
+## 253. Missing values
+254. Define the purpose of the Missing values component before implementation.
+255. Keep Missing values aligned with the organizer-data-driven career-intelligence objective.
+256. Use actual inspected data and frozen contracts as the source for Missing values.
+257. Document inputs, transformations, outputs, and ownership for Missing values.
+258. Validate assumptions used by Missing values before relying on them.
+259. Handle missing, invalid, empty, or unexpected inputs in Missing values explicitly.
+260. Keep Missing values reproducible and reviewable by another team member.
+261. Do not add unnecessary infrastructure to solve a Missing values requirement.
+262. Record important limitations and failure modes for Missing values.
+263. Define a clear acceptance condition for Missing values.
+264. Confirm the owner responsible for Missing values.
+265. Confirm the dependency order for Missing values.
+266. Confirm the expected artifact or response produced by Missing values.
+267. Confirm the validation method used for Missing values.
+268. Confirm that Missing values cannot silently alter raw organizer data.
+269. Confirm that errors in Missing values are observable during integration.
+270. Confirm that Missing values can be demonstrated within the hackathon time budget.
+271. Confirm that Missing values supports the Round 2 evidence story where relevant.
+272. Confirm that Missing values does not create unsupported causal claims.
+273. Confirm that Missing values is covered by the final release checklist.
+## 274. Duplicates
+275. Define the purpose of the Duplicates component before implementation.
+276. Keep Duplicates aligned with the organizer-data-driven career-intelligence objective.
+277. Use actual inspected data and frozen contracts as the source for Duplicates.
+278. Document inputs, transformations, outputs, and ownership for Duplicates.
+279. Validate assumptions used by Duplicates before relying on them.
+280. Handle missing, invalid, empty, or unexpected inputs in Duplicates explicitly.
+281. Keep Duplicates reproducible and reviewable by another team member.
+282. Do not add unnecessary infrastructure to solve a Duplicates requirement.
+283. Record important limitations and failure modes for Duplicates.
+284. Define a clear acceptance condition for Duplicates.
+285. Confirm the owner responsible for Duplicates.
+286. Confirm the dependency order for Duplicates.
+287. Confirm the expected artifact or response produced by Duplicates.
+288. Confirm the validation method used for Duplicates.
+289. Confirm that Duplicates cannot silently alter raw organizer data.
+290. Confirm that errors in Duplicates are observable during integration.
+291. Confirm that Duplicates can be demonstrated within the hackathon time budget.
+292. Confirm that Duplicates supports the Round 2 evidence story where relevant.
+293. Confirm that Duplicates does not create unsupported causal claims.
+294. Confirm that Duplicates is covered by the final release checklist.
+## 295. Outliers
+296. Define the purpose of the Outliers component before implementation.
+297. Keep Outliers aligned with the organizer-data-driven career-intelligence objective.
+298. Use actual inspected data and frozen contracts as the source for Outliers.
+299. Document inputs, transformations, outputs, and ownership for Outliers.
+300. Validate assumptions used by Outliers before relying on them.
+301. Handle missing, invalid, empty, or unexpected inputs in Outliers explicitly.
+302. Keep Outliers reproducible and reviewable by another team member.
+303. Do not add unnecessary infrastructure to solve a Outliers requirement.
+304. Record important limitations and failure modes for Outliers.
+305. Define a clear acceptance condition for Outliers.
+306. Confirm the owner responsible for Outliers.
+307. Confirm the dependency order for Outliers.
+308. Confirm the expected artifact or response produced by Outliers.
+309. Confirm the validation method used for Outliers.
+310. Confirm that Outliers cannot silently alter raw organizer data.
+311. Confirm that errors in Outliers are observable during integration.
+312. Confirm that Outliers can be demonstrated within the hackathon time budget.
+313. Confirm that Outliers supports the Round 2 evidence story where relevant.
+314. Confirm that Outliers does not create unsupported causal claims.
+315. Confirm that Outliers is covered by the final release checklist.
+## 316. Invalid values
+317. Define the purpose of the Invalid values component before implementation.
+318. Keep Invalid values aligned with the organizer-data-driven career-intelligence objective.
+319. Use actual inspected data and frozen contracts as the source for Invalid values.
+320. Document inputs, transformations, outputs, and ownership for Invalid values.
+321. Validate assumptions used by Invalid values before relying on them.
+322. Handle missing, invalid, empty, or unexpected inputs in Invalid values explicitly.
+323. Keep Invalid values reproducible and reviewable by another team member.
+324. Do not add unnecessary infrastructure to solve a Invalid values requirement.
+325. Record important limitations and failure modes for Invalid values.
+326. Define a clear acceptance condition for Invalid values.
+327. Confirm the owner responsible for Invalid values.
+328. Confirm the dependency order for Invalid values.
+329. Confirm the expected artifact or response produced by Invalid values.
+330. Confirm the validation method used for Invalid values.
+331. Confirm that Invalid values cannot silently alter raw organizer data.
+332. Confirm that errors in Invalid values are observable during integration.
+333. Confirm that Invalid values can be demonstrated within the hackathon time budget.
+334. Confirm that Invalid values supports the Round 2 evidence story where relevant.
+335. Confirm that Invalid values does not create unsupported causal claims.
+336. Confirm that Invalid values is covered by the final release checklist.
+## 337. Text cleaning
+338. Define the purpose of the Text cleaning component before implementation.
+339. Keep Text cleaning aligned with the organizer-data-driven career-intelligence objective.
+340. Use actual inspected data and frozen contracts as the source for Text cleaning.
+341. Document inputs, transformations, outputs, and ownership for Text cleaning.
+342. Validate assumptions used by Text cleaning before relying on them.
+343. Handle missing, invalid, empty, or unexpected inputs in Text cleaning explicitly.
+344. Keep Text cleaning reproducible and reviewable by another team member.
+345. Do not add unnecessary infrastructure to solve a Text cleaning requirement.
+346. Record important limitations and failure modes for Text cleaning.
+347. Define a clear acceptance condition for Text cleaning.
+348. Confirm the owner responsible for Text cleaning.
+349. Confirm the dependency order for Text cleaning.
+350. Confirm the expected artifact or response produced by Text cleaning.
+351. Confirm the validation method used for Text cleaning.
+352. Confirm that Text cleaning cannot silently alter raw organizer data.
+353. Confirm that errors in Text cleaning are observable during integration.
+354. Confirm that Text cleaning can be demonstrated within the hackathon time budget.
+355. Confirm that Text cleaning supports the Round 2 evidence story where relevant.
+356. Confirm that Text cleaning does not create unsupported causal claims.
+357. Confirm that Text cleaning is covered by the final release checklist.
+## 358. Salary normalization
+359. Define the purpose of the Salary normalization component before implementation.
+360. Keep Salary normalization aligned with the organizer-data-driven career-intelligence objective.
+361. Use actual inspected data and frozen contracts as the source for Salary normalization.
+362. Document inputs, transformations, outputs, and ownership for Salary normalization.
+363. Validate assumptions used by Salary normalization before relying on them.
+364. Handle missing, invalid, empty, or unexpected inputs in Salary normalization explicitly.
+365. Keep Salary normalization reproducible and reviewable by another team member.
+366. Do not add unnecessary infrastructure to solve a Salary normalization requirement.
+367. Record important limitations and failure modes for Salary normalization.
+368. Define a clear acceptance condition for Salary normalization.
+369. Confirm the owner responsible for Salary normalization.
+370. Confirm the dependency order for Salary normalization.
+371. Confirm the expected artifact or response produced by Salary normalization.
+372. Confirm the validation method used for Salary normalization.
+373. Confirm that Salary normalization cannot silently alter raw organizer data.
+374. Confirm that errors in Salary normalization are observable during integration.
+375. Confirm that Salary normalization can be demonstrated within the hackathon time budget.
+376. Confirm that Salary normalization supports the Round 2 evidence story where relevant.
+377. Confirm that Salary normalization does not create unsupported causal claims.
+378. Confirm that Salary normalization is covered by the final release checklist.
+## 379. Experience normalization
+380. Define the purpose of the Experience normalization component before implementation.
+381. Keep Experience normalization aligned with the organizer-data-driven career-intelligence objective.
+382. Use actual inspected data and frozen contracts as the source for Experience normalization.
+383. Document inputs, transformations, outputs, and ownership for Experience normalization.
+384. Validate assumptions used by Experience normalization before relying on them.
+385. Handle missing, invalid, empty, or unexpected inputs in Experience normalization explicitly.
+386. Keep Experience normalization reproducible and reviewable by another team member.
+387. Do not add unnecessary infrastructure to solve a Experience normalization requirement.
+388. Record important limitations and failure modes for Experience normalization.
+389. Define a clear acceptance condition for Experience normalization.
+390. Confirm the owner responsible for Experience normalization.
+391. Confirm the dependency order for Experience normalization.
+392. Confirm the expected artifact or response produced by Experience normalization.
+393. Confirm the validation method used for Experience normalization.
+394. Confirm that Experience normalization cannot silently alter raw organizer data.
+395. Confirm that errors in Experience normalization are observable during integration.
+396. Confirm that Experience normalization can be demonstrated within the hackathon time budget.
+397. Confirm that Experience normalization supports the Round 2 evidence story where relevant.
+398. Confirm that Experience normalization does not create unsupported causal claims.
+399. Confirm that Experience normalization is covered by the final release checklist.
+## 400. Location normalization
+401. Define the purpose of the Location normalization component before implementation.
+402. Keep Location normalization aligned with the organizer-data-driven career-intelligence objective.
+403. Use actual inspected data and frozen contracts as the source for Location normalization.
+404. Document inputs, transformations, outputs, and ownership for Location normalization.
+405. Validate assumptions used by Location normalization before relying on them.
+406. Handle missing, invalid, empty, or unexpected inputs in Location normalization explicitly.
+407. Keep Location normalization reproducible and reviewable by another team member.
+408. Do not add unnecessary infrastructure to solve a Location normalization requirement.
+409. Record important limitations and failure modes for Location normalization.
+410. Define a clear acceptance condition for Location normalization.
+411. Confirm the owner responsible for Location normalization.
+412. Confirm the dependency order for Location normalization.
+413. Confirm the expected artifact or response produced by Location normalization.
+414. Confirm the validation method used for Location normalization.
+415. Confirm that Location normalization cannot silently alter raw organizer data.
+416. Confirm that errors in Location normalization are observable during integration.
+417. Confirm that Location normalization can be demonstrated within the hackathon time budget.
+418. Confirm that Location normalization supports the Round 2 evidence story where relevant.
+419. Confirm that Location normalization does not create unsupported causal claims.
+420. Confirm that Location normalization is covered by the final release checklist.
+## 421. Skill normalization
+422. Define the purpose of the Skill normalization component before implementation.
+423. Keep Skill normalization aligned with the organizer-data-driven career-intelligence objective.
+424. Use actual inspected data and frozen contracts as the source for Skill normalization.
+425. Document inputs, transformations, outputs, and ownership for Skill normalization.
+426. Validate assumptions used by Skill normalization before relying on them.
+427. Handle missing, invalid, empty, or unexpected inputs in Skill normalization explicitly.
+428. Keep Skill normalization reproducible and reviewable by another team member.
+429. Do not add unnecessary infrastructure to solve a Skill normalization requirement.
+430. Record important limitations and failure modes for Skill normalization.
+431. Define a clear acceptance condition for Skill normalization.
+432. Confirm the owner responsible for Skill normalization.
+433. Confirm the dependency order for Skill normalization.
+434. Confirm the expected artifact or response produced by Skill normalization.
+435. Confirm the validation method used for Skill normalization.
+436. Confirm that Skill normalization cannot silently alter raw organizer data.
+437. Confirm that errors in Skill normalization are observable during integration.
+438. Confirm that Skill normalization can be demonstrated within the hackathon time budget.
+439. Confirm that Skill normalization supports the Round 2 evidence story where relevant.
+440. Confirm that Skill normalization does not create unsupported causal claims.
+441. Confirm that Skill normalization is covered by the final release checklist.
+## 442. Job title normalization
+443. Define the purpose of the Job title normalization component before implementation.
+444. Keep Job title normalization aligned with the organizer-data-driven career-intelligence objective.
+445. Use actual inspected data and frozen contracts as the source for Job title normalization.
+446. Document inputs, transformations, outputs, and ownership for Job title normalization.
+447. Validate assumptions used by Job title normalization before relying on them.
+448. Handle missing, invalid, empty, or unexpected inputs in Job title normalization explicitly.
+449. Keep Job title normalization reproducible and reviewable by another team member.
+450. Do not add unnecessary infrastructure to solve a Job title normalization requirement.
+451. Record important limitations and failure modes for Job title normalization.
+452. Define a clear acceptance condition for Job title normalization.
+453. Confirm the owner responsible for Job title normalization.
+454. Confirm the dependency order for Job title normalization.
+455. Confirm the expected artifact or response produced by Job title normalization.
+456. Confirm the validation method used for Job title normalization.
+457. Confirm that Job title normalization cannot silently alter raw organizer data.
+458. Confirm that errors in Job title normalization are observable during integration.
+459. Confirm that Job title normalization can be demonstrated within the hackathon time budget.
+460. Confirm that Job title normalization supports the Round 2 evidence story where relevant.
+461. Confirm that Job title normalization does not create unsupported causal claims.
+462. Confirm that Job title normalization is covered by the final release checklist.
+## 463. Company normalization
+464. Define the purpose of the Company normalization component before implementation.
+465. Keep Company normalization aligned with the organizer-data-driven career-intelligence objective.
+466. Use actual inspected data and frozen contracts as the source for Company normalization.
+467. Document inputs, transformations, outputs, and ownership for Company normalization.
+468. Validate assumptions used by Company normalization before relying on them.
+469. Handle missing, invalid, empty, or unexpected inputs in Company normalization explicitly.
+470. Keep Company normalization reproducible and reviewable by another team member.
+471. Do not add unnecessary infrastructure to solve a Company normalization requirement.
+472. Record important limitations and failure modes for Company normalization.
+473. Define a clear acceptance condition for Company normalization.
+474. Confirm the owner responsible for Company normalization.
+475. Confirm the dependency order for Company normalization.
+476. Confirm the expected artifact or response produced by Company normalization.
+477. Confirm the validation method used for Company normalization.
+478. Confirm that Company normalization cannot silently alter raw organizer data.
+479. Confirm that errors in Company normalization are observable during integration.
+480. Confirm that Company normalization can be demonstrated within the hackathon time budget.
+481. Confirm that Company normalization supports the Round 2 evidence story where relevant.
+482. Confirm that Company normalization does not create unsupported causal claims.
+483. Confirm that Company normalization is covered by the final release checklist.
+## 484. Derived columns
+485. Define the purpose of the Derived columns component before implementation.
+486. Keep Derived columns aligned with the organizer-data-driven career-intelligence objective.
+487. Use actual inspected data and frozen contracts as the source for Derived columns.
+488. Document inputs, transformations, outputs, and ownership for Derived columns.
+489. Validate assumptions used by Derived columns before relying on them.
+490. Handle missing, invalid, empty, or unexpected inputs in Derived columns explicitly.
+491. Keep Derived columns reproducible and reviewable by another team member.
+492. Do not add unnecessary infrastructure to solve a Derived columns requirement.
+493. Record important limitations and failure modes for Derived columns.
+494. Define a clear acceptance condition for Derived columns.
+495. Confirm the owner responsible for Derived columns.
+496. Confirm the dependency order for Derived columns.
+497. Confirm the expected artifact or response produced by Derived columns.
+498. Confirm the validation method used for Derived columns.
+499. Confirm that Derived columns cannot silently alter raw organizer data.
+500. Confirm that errors in Derived columns are observable during integration.
+501. Confirm that Derived columns can be demonstrated within the hackathon time budget.
+502. Confirm that Derived columns supports the Round 2 evidence story where relevant.
+503. Confirm that Derived columns does not create unsupported causal claims.
+504. Confirm that Derived columns is covered by the final release checklist.
+## 505. Aggregation
+506. Define the purpose of the Aggregation component before implementation.
+507. Keep Aggregation aligned with the organizer-data-driven career-intelligence objective.
+508. Use actual inspected data and frozen contracts as the source for Aggregation.
+509. Document inputs, transformations, outputs, and ownership for Aggregation.
+510. Validate assumptions used by Aggregation before relying on them.
+511. Handle missing, invalid, empty, or unexpected inputs in Aggregation explicitly.
+512. Keep Aggregation reproducible and reviewable by another team member.
+513. Do not add unnecessary infrastructure to solve a Aggregation requirement.
+514. Record important limitations and failure modes for Aggregation.
+515. Define a clear acceptance condition for Aggregation.
+516. Confirm the owner responsible for Aggregation.
+517. Confirm the dependency order for Aggregation.
+518. Confirm the expected artifact or response produced by Aggregation.
+519. Confirm the validation method used for Aggregation.
+520. Confirm that Aggregation cannot silently alter raw organizer data.
+521. Confirm that errors in Aggregation are observable during integration.
+522. Confirm that Aggregation can be demonstrated within the hackathon time budget.
+523. Confirm that Aggregation supports the Round 2 evidence story where relevant.
+524. Confirm that Aggregation does not create unsupported causal claims.
+525. Confirm that Aggregation is covered by the final release checklist.
+## 526. Join policy
+527. Define the purpose of the Join policy component before implementation.
+528. Keep Join policy aligned with the organizer-data-driven career-intelligence objective.
+529. Use actual inspected data and frozen contracts as the source for Join policy.
+530. Document inputs, transformations, outputs, and ownership for Join policy.
+531. Validate assumptions used by Join policy before relying on them.
+532. Handle missing, invalid, empty, or unexpected inputs in Join policy explicitly.
+533. Keep Join policy reproducible and reviewable by another team member.
+534. Do not add unnecessary infrastructure to solve a Join policy requirement.
+535. Record important limitations and failure modes for Join policy.
+536. Define a clear acceptance condition for Join policy.
+537. Confirm the owner responsible for Join policy.
+538. Confirm the dependency order for Join policy.
+539. Confirm the expected artifact or response produced by Join policy.
+540. Confirm the validation method used for Join policy.
+541. Confirm that Join policy cannot silently alter raw organizer data.
+542. Confirm that errors in Join policy are observable during integration.
+543. Confirm that Join policy can be demonstrated within the hackathon time budget.
+544. Confirm that Join policy supports the Round 2 evidence story where relevant.
+545. Confirm that Join policy does not create unsupported causal claims.
+546. Confirm that Join policy is covered by the final release checklist.
+## 547. Linkage policy
+548. Define the purpose of the Linkage policy component before implementation.
+549. Keep Linkage policy aligned with the organizer-data-driven career-intelligence objective.
+550. Use actual inspected data and frozen contracts as the source for Linkage policy.
+551. Document inputs, transformations, outputs, and ownership for Linkage policy.
+552. Validate assumptions used by Linkage policy before relying on them.
+553. Handle missing, invalid, empty, or unexpected inputs in Linkage policy explicitly.
+554. Keep Linkage policy reproducible and reviewable by another team member.
+555. Do not add unnecessary infrastructure to solve a Linkage policy requirement.
+556. Record important limitations and failure modes for Linkage policy.
+557. Define a clear acceptance condition for Linkage policy.
+558. Confirm the owner responsible for Linkage policy.
+559. Confirm the dependency order for Linkage policy.
+560. Confirm the expected artifact or response produced by Linkage policy.
+561. Confirm the validation method used for Linkage policy.
+562. Confirm that Linkage policy cannot silently alter raw organizer data.
+563. Confirm that errors in Linkage policy are observable during integration.
+564. Confirm that Linkage policy can be demonstrated within the hackathon time budget.
+565. Confirm that Linkage policy supports the Round 2 evidence story where relevant.
+566. Confirm that Linkage policy does not create unsupported causal claims.
+567. Confirm that Linkage policy is covered by the final release checklist.
+## 568. Provenance
+569. Define the purpose of the Provenance component before implementation.
+570. Keep Provenance aligned with the organizer-data-driven career-intelligence objective.
+571. Use actual inspected data and frozen contracts as the source for Provenance.
+572. Document inputs, transformations, outputs, and ownership for Provenance.
+573. Validate assumptions used by Provenance before relying on them.
+574. Handle missing, invalid, empty, or unexpected inputs in Provenance explicitly.
+575. Keep Provenance reproducible and reviewable by another team member.
+576. Do not add unnecessary infrastructure to solve a Provenance requirement.
+577. Record important limitations and failure modes for Provenance.
+578. Define a clear acceptance condition for Provenance.
+579. Confirm the owner responsible for Provenance.
+580. Confirm the dependency order for Provenance.
+581. Confirm the expected artifact or response produced by Provenance.
+582. Confirm the validation method used for Provenance.
+583. Confirm that Provenance cannot silently alter raw organizer data.
+584. Confirm that errors in Provenance are observable during integration.
+585. Confirm that Provenance can be demonstrated within the hackathon time budget.
+586. Confirm that Provenance supports the Round 2 evidence story where relevant.
+587. Confirm that Provenance does not create unsupported causal claims.
+588. Confirm that Provenance is covered by the final release checklist.
+## 589. Metadata
+590. Define the purpose of the Metadata component before implementation.
+591. Keep Metadata aligned with the organizer-data-driven career-intelligence objective.
+592. Use actual inspected data and frozen contracts as the source for Metadata.
+593. Document inputs, transformations, outputs, and ownership for Metadata.
+594. Validate assumptions used by Metadata before relying on them.
+595. Handle missing, invalid, empty, or unexpected inputs in Metadata explicitly.
+596. Keep Metadata reproducible and reviewable by another team member.
+597. Do not add unnecessary infrastructure to solve a Metadata requirement.
+598. Record important limitations and failure modes for Metadata.
+599. Define a clear acceptance condition for Metadata.
+600. Confirm the owner responsible for Metadata.
+601. Confirm the dependency order for Metadata.
+602. Confirm the expected artifact or response produced by Metadata.
+603. Confirm the validation method used for Metadata.
+604. Confirm that Metadata cannot silently alter raw organizer data.
+605. Confirm that errors in Metadata are observable during integration.
+606. Confirm that Metadata can be demonstrated within the hackathon time budget.
+607. Confirm that Metadata supports the Round 2 evidence story where relevant.
+608. Confirm that Metadata does not create unsupported causal claims.
+609. Confirm that Metadata is covered by the final release checklist.
+## 610. Data dictionary
+611. Define the purpose of the Data dictionary component before implementation.
+612. Keep Data dictionary aligned with the organizer-data-driven career-intelligence objective.
+613. Use actual inspected data and frozen contracts as the source for Data dictionary.
+614. Document inputs, transformations, outputs, and ownership for Data dictionary.
+615. Validate assumptions used by Data dictionary before relying on them.
+616. Handle missing, invalid, empty, or unexpected inputs in Data dictionary explicitly.
+617. Keep Data dictionary reproducible and reviewable by another team member.
+618. Do not add unnecessary infrastructure to solve a Data dictionary requirement.
+619. Record important limitations and failure modes for Data dictionary.
+620. Define a clear acceptance condition for Data dictionary.
+621. Confirm the owner responsible for Data dictionary.
+622. Confirm the dependency order for Data dictionary.
+623. Confirm the expected artifact or response produced by Data dictionary.
+624. Confirm the validation method used for Data dictionary.
+625. Confirm that Data dictionary cannot silently alter raw organizer data.
+626. Confirm that errors in Data dictionary are observable during integration.
+627. Confirm that Data dictionary can be demonstrated within the hackathon time budget.
+628. Confirm that Data dictionary supports the Round 2 evidence story where relevant.
+629. Confirm that Data dictionary does not create unsupported causal claims.
+630. Confirm that Data dictionary is covered by the final release checklist.
+## 631. Quality report
+632. Define the purpose of the Quality report component before implementation.
+633. Keep Quality report aligned with the organizer-data-driven career-intelligence objective.
+634. Use actual inspected data and frozen contracts as the source for Quality report.
+635. Document inputs, transformations, outputs, and ownership for Quality report.
+636. Validate assumptions used by Quality report before relying on them.
+637. Handle missing, invalid, empty, or unexpected inputs in Quality report explicitly.
+638. Keep Quality report reproducible and reviewable by another team member.
+639. Do not add unnecessary infrastructure to solve a Quality report requirement.
+640. Record important limitations and failure modes for Quality report.
+641. Define a clear acceptance condition for Quality report.
+642. Confirm the owner responsible for Quality report.
+643. Confirm the dependency order for Quality report.
+644. Confirm the expected artifact or response produced by Quality report.
+645. Confirm the validation method used for Quality report.
+646. Confirm that Quality report cannot silently alter raw organizer data.
+647. Confirm that errors in Quality report are observable during integration.
+648. Confirm that Quality report can be demonstrated within the hackathon time budget.
+649. Confirm that Quality report supports the Round 2 evidence story where relevant.
+650. Confirm that Quality report does not create unsupported causal claims.
+651. Confirm that Quality report is covered by the final release checklist.
+## 652. Profiling report
+653. Define the purpose of the Profiling report component before implementation.
+654. Keep Profiling report aligned with the organizer-data-driven career-intelligence objective.
+655. Use actual inspected data and frozen contracts as the source for Profiling report.
+656. Document inputs, transformations, outputs, and ownership for Profiling report.
+657. Validate assumptions used by Profiling report before relying on them.
+658. Handle missing, invalid, empty, or unexpected inputs in Profiling report explicitly.
+659. Keep Profiling report reproducible and reviewable by another team member.
+660. Do not add unnecessary infrastructure to solve a Profiling report requirement.
+661. Record important limitations and failure modes for Profiling report.
+662. Define a clear acceptance condition for Profiling report.
+663. Confirm the owner responsible for Profiling report.
+664. Confirm the dependency order for Profiling report.
+665. Confirm the expected artifact or response produced by Profiling report.
+666. Confirm the validation method used for Profiling report.
+667. Confirm that Profiling report cannot silently alter raw organizer data.
+668. Confirm that errors in Profiling report are observable during integration.
+669. Confirm that Profiling report can be demonstrated within the hackathon time budget.
+670. Confirm that Profiling report supports the Round 2 evidence story where relevant.
+671. Confirm that Profiling report does not create unsupported causal claims.
+672. Confirm that Profiling report is covered by the final release checklist.
+## 673. Validation
+674. Define the purpose of the Validation component before implementation.
+675. Keep Validation aligned with the organizer-data-driven career-intelligence objective.
+676. Use actual inspected data and frozen contracts as the source for Validation.
+677. Document inputs, transformations, outputs, and ownership for Validation.
+678. Validate assumptions used by Validation before relying on them.
+679. Handle missing, invalid, empty, or unexpected inputs in Validation explicitly.
+680. Keep Validation reproducible and reviewable by another team member.
+681. Do not add unnecessary infrastructure to solve a Validation requirement.
+682. Record important limitations and failure modes for Validation.
+683. Define a clear acceptance condition for Validation.
+684. Confirm the owner responsible for Validation.
+685. Confirm the dependency order for Validation.
+686. Confirm the expected artifact or response produced by Validation.
+687. Confirm the validation method used for Validation.
+688. Confirm that Validation cannot silently alter raw organizer data.
+689. Confirm that errors in Validation are observable during integration.
+690. Confirm that Validation can be demonstrated within the hackathon time budget.
+691. Confirm that Validation supports the Round 2 evidence story where relevant.
+692. Confirm that Validation does not create unsupported causal claims.
+693. Confirm that Validation is covered by the final release checklist.
+## 694. Reproducibility
+695. Define the purpose of the Reproducibility component before implementation.
+696. Keep Reproducibility aligned with the organizer-data-driven career-intelligence objective.
+697. Use actual inspected data and frozen contracts as the source for Reproducibility.
+698. Document inputs, transformations, outputs, and ownership for Reproducibility.
+699. Validate assumptions used by Reproducibility before relying on them.
+700. Handle missing, invalid, empty, or unexpected inputs in Reproducibility explicitly.
+701. Keep Reproducibility reproducible and reviewable by another team member.
+702. Do not add unnecessary infrastructure to solve a Reproducibility requirement.
+703. Record important limitations and failure modes for Reproducibility.
+704. Define a clear acceptance condition for Reproducibility.
+705. Confirm the owner responsible for Reproducibility.
+706. Confirm the dependency order for Reproducibility.
+707. Confirm the expected artifact or response produced by Reproducibility.
+708. Confirm the validation method used for Reproducibility.
+709. Confirm that Reproducibility cannot silently alter raw organizer data.
+710. Confirm that errors in Reproducibility are observable during integration.
+711. Confirm that Reproducibility can be demonstrated within the hackathon time budget.
+712. Confirm that Reproducibility supports the Round 2 evidence story where relevant.
+713. Confirm that Reproducibility does not create unsupported causal claims.
+714. Confirm that Reproducibility is covered by the final release checklist.
+## 715. Script design
+716. Define the purpose of the Script design component before implementation.
+717. Keep Script design aligned with the organizer-data-driven career-intelligence objective.
+718. Use actual inspected data and frozen contracts as the source for Script design.
+719. Document inputs, transformations, outputs, and ownership for Script design.
+720. Validate assumptions used by Script design before relying on them.
+721. Handle missing, invalid, empty, or unexpected inputs in Script design explicitly.
+722. Keep Script design reproducible and reviewable by another team member.
+723. Do not add unnecessary infrastructure to solve a Script design requirement.
+724. Record important limitations and failure modes for Script design.
+725. Define a clear acceptance condition for Script design.
+726. Confirm the owner responsible for Script design.
+727. Confirm the dependency order for Script design.
+728. Confirm the expected artifact or response produced by Script design.
+729. Confirm the validation method used for Script design.
+730. Confirm that Script design cannot silently alter raw organizer data.
+731. Confirm that errors in Script design are observable during integration.
+732. Confirm that Script design can be demonstrated within the hackathon time budget.
+733. Confirm that Script design supports the Round 2 evidence story where relevant.
+734. Confirm that Script design does not create unsupported causal claims.
+735. Confirm that Script design is covered by the final release checklist.
+## 736. Idempotency
+737. Define the purpose of the Idempotency component before implementation.
+738. Keep Idempotency aligned with the organizer-data-driven career-intelligence objective.
+739. Use actual inspected data and frozen contracts as the source for Idempotency.
+740. Document inputs, transformations, outputs, and ownership for Idempotency.
+741. Validate assumptions used by Idempotency before relying on them.
+742. Handle missing, invalid, empty, or unexpected inputs in Idempotency explicitly.
+743. Keep Idempotency reproducible and reviewable by another team member.
+744. Do not add unnecessary infrastructure to solve a Idempotency requirement.
+745. Record important limitations and failure modes for Idempotency.
+746. Define a clear acceptance condition for Idempotency.
+747. Confirm the owner responsible for Idempotency.
+748. Confirm the dependency order for Idempotency.
+749. Confirm the expected artifact or response produced by Idempotency.
+750. Confirm the validation method used for Idempotency.
+751. Confirm that Idempotency cannot silently alter raw organizer data.
+752. Confirm that errors in Idempotency are observable during integration.
+753. Confirm that Idempotency can be demonstrated within the hackathon time budget.
+754. Confirm that Idempotency supports the Round 2 evidence story where relevant.
+755. Confirm that Idempotency does not create unsupported causal claims.
+756. Confirm that Idempotency is covered by the final release checklist.
+## 757. Determinism
+758. Define the purpose of the Determinism component before implementation.
+759. Keep Determinism aligned with the organizer-data-driven career-intelligence objective.
+760. Use actual inspected data and frozen contracts as the source for Determinism.
+761. Document inputs, transformations, outputs, and ownership for Determinism.
+762. Validate assumptions used by Determinism before relying on them.
+763. Handle missing, invalid, empty, or unexpected inputs in Determinism explicitly.
+764. Keep Determinism reproducible and reviewable by another team member.
+765. Do not add unnecessary infrastructure to solve a Determinism requirement.
+766. Record important limitations and failure modes for Determinism.
+767. Define a clear acceptance condition for Determinism.
+768. Confirm the owner responsible for Determinism.
+769. Confirm the dependency order for Determinism.
+770. Confirm the expected artifact or response produced by Determinism.
+771. Confirm the validation method used for Determinism.
+772. Confirm that Determinism cannot silently alter raw organizer data.
+773. Confirm that errors in Determinism are observable during integration.
+774. Confirm that Determinism can be demonstrated within the hackathon time budget.
+775. Confirm that Determinism supports the Round 2 evidence story where relevant.
+776. Confirm that Determinism does not create unsupported causal claims.
+777. Confirm that Determinism is covered by the final release checklist.
+## 778. Logging
+779. Define the purpose of the Logging component before implementation.
+780. Keep Logging aligned with the organizer-data-driven career-intelligence objective.
+781. Use actual inspected data and frozen contracts as the source for Logging.
+782. Document inputs, transformations, outputs, and ownership for Logging.
+783. Validate assumptions used by Logging before relying on them.
+784. Handle missing, invalid, empty, or unexpected inputs in Logging explicitly.
+785. Keep Logging reproducible and reviewable by another team member.
+786. Do not add unnecessary infrastructure to solve a Logging requirement.
+787. Record important limitations and failure modes for Logging.
+788. Define a clear acceptance condition for Logging.
+789. Confirm the owner responsible for Logging.
+790. Confirm the dependency order for Logging.
+791. Confirm the expected artifact or response produced by Logging.
+792. Confirm the validation method used for Logging.
+793. Confirm that Logging cannot silently alter raw organizer data.
+794. Confirm that errors in Logging are observable during integration.
+795. Confirm that Logging can be demonstrated within the hackathon time budget.
+796. Confirm that Logging supports the Round 2 evidence story where relevant.
+797. Confirm that Logging does not create unsupported causal claims.
+798. Confirm that Logging is covered by the final release checklist.
+## 799. Error handling
+800. Define the purpose of the Error handling component before implementation.
+801. Keep Error handling aligned with the organizer-data-driven career-intelligence objective.
+802. Use actual inspected data and frozen contracts as the source for Error handling.
+803. Document inputs, transformations, outputs, and ownership for Error handling.
+804. Validate assumptions used by Error handling before relying on them.
+805. Handle missing, invalid, empty, or unexpected inputs in Error handling explicitly.
+806. Keep Error handling reproducible and reviewable by another team member.
+807. Do not add unnecessary infrastructure to solve a Error handling requirement.
+808. Record important limitations and failure modes for Error handling.
+809. Define a clear acceptance condition for Error handling.
+810. Confirm the owner responsible for Error handling.
+811. Confirm the dependency order for Error handling.
+812. Confirm the expected artifact or response produced by Error handling.
+813. Confirm the validation method used for Error handling.
+814. Confirm that Error handling cannot silently alter raw organizer data.
+815. Confirm that errors in Error handling are observable during integration.
+816. Confirm that Error handling can be demonstrated within the hackathon time budget.
+817. Confirm that Error handling supports the Round 2 evidence story where relevant.
+818. Confirm that Error handling does not create unsupported causal claims.
+819. Confirm that Error handling is covered by the final release checklist.
+## 820. Path handling
+821. Define the purpose of the Path handling component before implementation.
+822. Keep Path handling aligned with the organizer-data-driven career-intelligence objective.
+823. Use actual inspected data and frozen contracts as the source for Path handling.
+824. Document inputs, transformations, outputs, and ownership for Path handling.
+825. Validate assumptions used by Path handling before relying on them.
+826. Handle missing, invalid, empty, or unexpected inputs in Path handling explicitly.
+827. Keep Path handling reproducible and reviewable by another team member.
+828. Do not add unnecessary infrastructure to solve a Path handling requirement.
+829. Record important limitations and failure modes for Path handling.
+830. Define a clear acceptance condition for Path handling.
+831. Confirm the owner responsible for Path handling.
+832. Confirm the dependency order for Path handling.
+833. Confirm the expected artifact or response produced by Path handling.
+834. Confirm the validation method used for Path handling.
+835. Confirm that Path handling cannot silently alter raw organizer data.
+836. Confirm that errors in Path handling are observable during integration.
+837. Confirm that Path handling can be demonstrated within the hackathon time budget.
+838. Confirm that Path handling supports the Round 2 evidence story where relevant.
+839. Confirm that Path handling does not create unsupported causal claims.
+840. Confirm that Path handling is covered by the final release checklist.
+## 841. Large-file handling
+842. Define the purpose of the Large-file handling component before implementation.
+843. Keep Large-file handling aligned with the organizer-data-driven career-intelligence objective.
+844. Use actual inspected data and frozen contracts as the source for Large-file handling.
+845. Document inputs, transformations, outputs, and ownership for Large-file handling.
+846. Validate assumptions used by Large-file handling before relying on them.
+847. Handle missing, invalid, empty, or unexpected inputs in Large-file handling explicitly.
+848. Keep Large-file handling reproducible and reviewable by another team member.
+849. Do not add unnecessary infrastructure to solve a Large-file handling requirement.
+850. Record important limitations and failure modes for Large-file handling.
+851. Define a clear acceptance condition for Large-file handling.
+852. Confirm the owner responsible for Large-file handling.
+853. Confirm the dependency order for Large-file handling.
+854. Confirm the expected artifact or response produced by Large-file handling.
+855. Confirm the validation method used for Large-file handling.
+856. Confirm that Large-file handling cannot silently alter raw organizer data.
+857. Confirm that errors in Large-file handling are observable during integration.
+858. Confirm that Large-file handling can be demonstrated within the hackathon time budget.
+859. Confirm that Large-file handling supports the Round 2 evidence story where relevant.
+860. Confirm that Large-file handling does not create unsupported causal claims.
+861. Confirm that Large-file handling is covered by the final release checklist.
+## 862. Memory use
+863. Define the purpose of the Memory use component before implementation.
+864. Keep Memory use aligned with the organizer-data-driven career-intelligence objective.
+865. Use actual inspected data and frozen contracts as the source for Memory use.
+866. Document inputs, transformations, outputs, and ownership for Memory use.
+867. Validate assumptions used by Memory use before relying on them.
+868. Handle missing, invalid, empty, or unexpected inputs in Memory use explicitly.
+869. Keep Memory use reproducible and reviewable by another team member.
+870. Do not add unnecessary infrastructure to solve a Memory use requirement.
+871. Record important limitations and failure modes for Memory use.
+872. Define a clear acceptance condition for Memory use.
+873. Confirm the owner responsible for Memory use.
+874. Confirm the dependency order for Memory use.
+875. Confirm the expected artifact or response produced by Memory use.
+876. Confirm the validation method used for Memory use.
+877. Confirm that Memory use cannot silently alter raw organizer data.
+878. Confirm that errors in Memory use are observable during integration.
+879. Confirm that Memory use can be demonstrated within the hackathon time budget.
+880. Confirm that Memory use supports the Round 2 evidence story where relevant.
+881. Confirm that Memory use does not create unsupported causal claims.
+882. Confirm that Memory use is covered by the final release checklist.
+## 883. Parquet option
+884. Define the purpose of the Parquet option component before implementation.
+885. Keep Parquet option aligned with the organizer-data-driven career-intelligence objective.
+886. Use actual inspected data and frozen contracts as the source for Parquet option.
+887. Document inputs, transformations, outputs, and ownership for Parquet option.
+888. Validate assumptions used by Parquet option before relying on them.
+889. Handle missing, invalid, empty, or unexpected inputs in Parquet option explicitly.
+890. Keep Parquet option reproducible and reviewable by another team member.
+891. Do not add unnecessary infrastructure to solve a Parquet option requirement.
+892. Record important limitations and failure modes for Parquet option.
+893. Define a clear acceptance condition for Parquet option.
+894. Confirm the owner responsible for Parquet option.
+895. Confirm the dependency order for Parquet option.
+896. Confirm the expected artifact or response produced by Parquet option.
+897. Confirm the validation method used for Parquet option.
+898. Confirm that Parquet option cannot silently alter raw organizer data.
+899. Confirm that errors in Parquet option are observable during integration.
+900. Confirm that Parquet option can be demonstrated within the hackathon time budget.
+901. Confirm that Parquet option supports the Round 2 evidence story where relevant.
+902. Confirm that Parquet option does not create unsupported causal claims.
+903. Confirm that Parquet option is covered by the final release checklist.
+## 904. CSV option
+905. Define the purpose of the CSV option component before implementation.
+906. Keep CSV option aligned with the organizer-data-driven career-intelligence objective.
+907. Use actual inspected data and frozen contracts as the source for CSV option.
+908. Document inputs, transformations, outputs, and ownership for CSV option.
+909. Validate assumptions used by CSV option before relying on them.
+910. Handle missing, invalid, empty, or unexpected inputs in CSV option explicitly.
+911. Keep CSV option reproducible and reviewable by another team member.
+912. Do not add unnecessary infrastructure to solve a CSV option requirement.
+913. Record important limitations and failure modes for CSV option.
+914. Define a clear acceptance condition for CSV option.
+915. Confirm the owner responsible for CSV option.
+916. Confirm the dependency order for CSV option.
+917. Confirm the expected artifact or response produced by CSV option.
+918. Confirm the validation method used for CSV option.
+919. Confirm that CSV option cannot silently alter raw organizer data.
+920. Confirm that errors in CSV option are observable during integration.
+921. Confirm that CSV option can be demonstrated within the hackathon time budget.
+922. Confirm that CSV option supports the Round 2 evidence story where relevant.
+923. Confirm that CSV option does not create unsupported causal claims.
+924. Confirm that CSV option is covered by the final release checklist.
+## 925. Artifact versioning
+926. Define the purpose of the Artifact versioning component before implementation.
+927. Keep Artifact versioning aligned with the organizer-data-driven career-intelligence objective.
+928. Use actual inspected data and frozen contracts as the source for Artifact versioning.
+929. Document inputs, transformations, outputs, and ownership for Artifact versioning.
+930. Validate assumptions used by Artifact versioning before relying on them.
+931. Handle missing, invalid, empty, or unexpected inputs in Artifact versioning explicitly.
+932. Keep Artifact versioning reproducible and reviewable by another team member.
+933. Do not add unnecessary infrastructure to solve a Artifact versioning requirement.
+934. Record important limitations and failure modes for Artifact versioning.
+935. Define a clear acceptance condition for Artifact versioning.
+936. Confirm the owner responsible for Artifact versioning.
+937. Confirm the dependency order for Artifact versioning.
+938. Confirm the expected artifact or response produced by Artifact versioning.
+939. Confirm the validation method used for Artifact versioning.
+940. Confirm that Artifact versioning cannot silently alter raw organizer data.
+941. Confirm that errors in Artifact versioning are observable during integration.
+942. Confirm that Artifact versioning can be demonstrated within the hackathon time budget.
+943. Confirm that Artifact versioning supports the Round 2 evidence story where relevant.
+944. Confirm that Artifact versioning does not create unsupported causal claims.
+945. Confirm that Artifact versioning is covered by the final release checklist.
+## 946. Model-ready data
+947. Define the purpose of the Model-ready data component before implementation.
+948. Keep Model-ready data aligned with the organizer-data-driven career-intelligence objective.
+949. Use actual inspected data and frozen contracts as the source for Model-ready data.
+950. Document inputs, transformations, outputs, and ownership for Model-ready data.
+951. Validate assumptions used by Model-ready data before relying on them.
+952. Handle missing, invalid, empty, or unexpected inputs in Model-ready data explicitly.
+953. Keep Model-ready data reproducible and reviewable by another team member.
+954. Do not add unnecessary infrastructure to solve a Model-ready data requirement.
+955. Record important limitations and failure modes for Model-ready data.
+956. Define a clear acceptance condition for Model-ready data.
+957. Confirm the owner responsible for Model-ready data.
+958. Confirm the dependency order for Model-ready data.
+959. Confirm the expected artifact or response produced by Model-ready data.
+960. Confirm the validation method used for Model-ready data.
+961. Confirm that Model-ready data cannot silently alter raw organizer data.
+962. Confirm that errors in Model-ready data are observable during integration.
+963. Confirm that Model-ready data can be demonstrated within the hackathon time budget.
+964. Confirm that Model-ready data supports the Round 2 evidence story where relevant.
+965. Confirm that Model-ready data does not create unsupported causal claims.
+966. Confirm that Model-ready data is covered by the final release checklist.
+## 967. Dashboard-ready data
+968. Define the purpose of the Dashboard-ready data component before implementation.
+969. Keep Dashboard-ready data aligned with the organizer-data-driven career-intelligence objective.
+970. Use actual inspected data and frozen contracts as the source for Dashboard-ready data.
+971. Document inputs, transformations, outputs, and ownership for Dashboard-ready data.
+972. Validate assumptions used by Dashboard-ready data before relying on them.
+973. Handle missing, invalid, empty, or unexpected inputs in Dashboard-ready data explicitly.
+974. Keep Dashboard-ready data reproducible and reviewable by another team member.
+975. Do not add unnecessary infrastructure to solve a Dashboard-ready data requirement.
+976. Record important limitations and failure modes for Dashboard-ready data.
+977. Define a clear acceptance condition for Dashboard-ready data.
+978. Confirm the owner responsible for Dashboard-ready data.
+979. Confirm the dependency order for Dashboard-ready data.
+980. Confirm the expected artifact or response produced by Dashboard-ready data.
+981. Confirm the validation method used for Dashboard-ready data.
+982. Confirm that Dashboard-ready data cannot silently alter raw organizer data.
+983. Confirm that errors in Dashboard-ready data are observable during integration.
+984. Confirm that Dashboard-ready data can be demonstrated within the hackathon time budget.
+985. Confirm that Dashboard-ready data supports the Round 2 evidence story where relevant.
+986. Confirm that Dashboard-ready data does not create unsupported causal claims.
+987. Confirm that Dashboard-ready data is covered by the final release checklist.
+## 988. Summary tables
+989. Define the purpose of the Summary tables component before implementation.
+990. Keep Summary tables aligned with the organizer-data-driven career-intelligence objective.
+991. Use actual inspected data and frozen contracts as the source for Summary tables.
+992. Document inputs, transformations, outputs, and ownership for Summary tables.
+993. Validate assumptions used by Summary tables before relying on them.
+994. Handle missing, invalid, empty, or unexpected inputs in Summary tables explicitly.
+995. Keep Summary tables reproducible and reviewable by another team member.
+996. Do not add unnecessary infrastructure to solve a Summary tables requirement.
+997. Record important limitations and failure modes for Summary tables.
+998. Define a clear acceptance condition for Summary tables.
+999. Confirm the owner responsible for Summary tables.
+1000. Confirm the dependency order for Summary tables.
+1001. Confirm the expected artifact or response produced by Summary tables.
+1002. Confirm the validation method used for Summary tables.
+1003. Confirm that Summary tables cannot silently alter raw organizer data.
+1004. Confirm that errors in Summary tables are observable during integration.
+1005. Confirm that Summary tables can be demonstrated within the hackathon time budget.
+1006. Confirm that Summary tables supports the Round 2 evidence story where relevant.
+1007. Confirm that Summary tables does not create unsupported causal claims.
+1008. Confirm that Summary tables is covered by the final release checklist.
+## 1009. Skill tables
+1010. Define the purpose of the Skill tables component before implementation.
+1011. Keep Skill tables aligned with the organizer-data-driven career-intelligence objective.
+1012. Use actual inspected data and frozen contracts as the source for Skill tables.
+1013. Document inputs, transformations, outputs, and ownership for Skill tables.
+1014. Validate assumptions used by Skill tables before relying on them.
+1015. Handle missing, invalid, empty, or unexpected inputs in Skill tables explicitly.
+1016. Keep Skill tables reproducible and reviewable by another team member.
+1017. Do not add unnecessary infrastructure to solve a Skill tables requirement.
+1018. Record important limitations and failure modes for Skill tables.
+1019. Define a clear acceptance condition for Skill tables.
+1020. Confirm the owner responsible for Skill tables.
+1021. Confirm the dependency order for Skill tables.
+1022. Confirm the expected artifact or response produced by Skill tables.
+1023. Confirm the validation method used for Skill tables.
+1024. Confirm that Skill tables cannot silently alter raw organizer data.
+1025. Confirm that errors in Skill tables are observable during integration.
+1026. Confirm that Skill tables can be demonstrated within the hackathon time budget.
+1027. Confirm that Skill tables supports the Round 2 evidence story where relevant.
+1028. Confirm that Skill tables does not create unsupported causal claims.
+1029. Confirm that Skill tables is covered by the final release checklist.
+## 1030. Salary tables
+1031. Define the purpose of the Salary tables component before implementation.
+1032. Keep Salary tables aligned with the organizer-data-driven career-intelligence objective.
+1033. Use actual inspected data and frozen contracts as the source for Salary tables.
+1034. Document inputs, transformations, outputs, and ownership for Salary tables.
+1035. Validate assumptions used by Salary tables before relying on them.
+1036. Handle missing, invalid, empty, or unexpected inputs in Salary tables explicitly.
+1037. Keep Salary tables reproducible and reviewable by another team member.
+1038. Do not add unnecessary infrastructure to solve a Salary tables requirement.
+1039. Record important limitations and failure modes for Salary tables.
+1040. Define a clear acceptance condition for Salary tables.
+1041. Confirm the owner responsible for Salary tables.
+1042. Confirm the dependency order for Salary tables.
+1043. Confirm the expected artifact or response produced by Salary tables.
+1044. Confirm the validation method used for Salary tables.
+1045. Confirm that Salary tables cannot silently alter raw organizer data.
+1046. Confirm that errors in Salary tables are observable during integration.
+1047. Confirm that Salary tables can be demonstrated within the hackathon time budget.
+1048. Confirm that Salary tables supports the Round 2 evidence story where relevant.
+1049. Confirm that Salary tables does not create unsupported causal claims.
+1050. Confirm that Salary tables is covered by the final release checklist.
+## 1051. Personality tables
+1052. Define the purpose of the Personality tables component before implementation.
+1053. Keep Personality tables aligned with the organizer-data-driven career-intelligence objective.
+1054. Use actual inspected data and frozen contracts as the source for Personality tables.
+1055. Document inputs, transformations, outputs, and ownership for Personality tables.
+1056. Validate assumptions used by Personality tables before relying on them.
+1057. Handle missing, invalid, empty, or unexpected inputs in Personality tables explicitly.
+1058. Keep Personality tables reproducible and reviewable by another team member.
+1059. Do not add unnecessary infrastructure to solve a Personality tables requirement.
+1060. Record important limitations and failure modes for Personality tables.
+1061. Define a clear acceptance condition for Personality tables.
+1062. Confirm the owner responsible for Personality tables.
+1063. Confirm the dependency order for Personality tables.
+1064. Confirm the expected artifact or response produced by Personality tables.
+1065. Confirm the validation method used for Personality tables.
+1066. Confirm that Personality tables cannot silently alter raw organizer data.
+1067. Confirm that errors in Personality tables are observable during integration.
+1068. Confirm that Personality tables can be demonstrated within the hackathon time budget.
+1069. Confirm that Personality tables supports the Round 2 evidence story where relevant.
+1070. Confirm that Personality tables does not create unsupported causal claims.
+1071. Confirm that Personality tables is covered by the final release checklist.
+## 1072. Job tables
+1073. Define the purpose of the Job tables component before implementation.
+1074. Keep Job tables aligned with the organizer-data-driven career-intelligence objective.
+1075. Use actual inspected data and frozen contracts as the source for Job tables.
+1076. Document inputs, transformations, outputs, and ownership for Job tables.
+1077. Validate assumptions used by Job tables before relying on them.
+1078. Handle missing, invalid, empty, or unexpected inputs in Job tables explicitly.
+1079. Keep Job tables reproducible and reviewable by another team member.
+1080. Do not add unnecessary infrastructure to solve a Job tables requirement.
+1081. Record important limitations and failure modes for Job tables.
+1082. Define a clear acceptance condition for Job tables.
+1083. Confirm the owner responsible for Job tables.
+1084. Confirm the dependency order for Job tables.
+1085. Confirm the expected artifact or response produced by Job tables.
+1086. Confirm the validation method used for Job tables.
+1087. Confirm that Job tables cannot silently alter raw organizer data.
+1088. Confirm that errors in Job tables are observable during integration.
+1089. Confirm that Job tables can be demonstrated within the hackathon time budget.
+1090. Confirm that Job tables supports the Round 2 evidence story where relevant.
+1091. Confirm that Job tables does not create unsupported causal claims.
+1092. Confirm that Job tables is covered by the final release checklist.
+## 1093. No database MVP
+1094. Define the purpose of the No database MVP component before implementation.
+1095. Keep No database MVP aligned with the organizer-data-driven career-intelligence objective.
+1096. Use actual inspected data and frozen contracts as the source for No database MVP.
+1097. Document inputs, transformations, outputs, and ownership for No database MVP.
+1098. Validate assumptions used by No database MVP before relying on them.
+1099. Handle missing, invalid, empty, or unexpected inputs in No database MVP explicitly.
+1100. Keep No database MVP reproducible and reviewable by another team member.
+1101. Do not add unnecessary infrastructure to solve a No database MVP requirement.
+1102. Record important limitations and failure modes for No database MVP.
+1103. Define a clear acceptance condition for No database MVP.
+1104. Confirm the owner responsible for No database MVP.
+1105. Confirm the dependency order for No database MVP.
+1106. Confirm the expected artifact or response produced by No database MVP.
+1107. Confirm the validation method used for No database MVP.
+1108. Confirm that No database MVP cannot silently alter raw organizer data.
+1109. Confirm that errors in No database MVP are observable during integration.
+1110. Confirm that No database MVP can be demonstrated within the hackathon time budget.
+1111. Confirm that No database MVP supports the Round 2 evidence story where relevant.
+1112. Confirm that No database MVP does not create unsupported causal claims.
+1113. Confirm that No database MVP is covered by the final release checklist.
+## 1114. When database becomes justified
+1115. Define the purpose of the When database becomes justified component before implementation.
+1116. Keep When database becomes justified aligned with the organizer-data-driven career-intelligence objective.
+1117. Use actual inspected data and frozen contracts as the source for When database becomes justified.
+1118. Document inputs, transformations, outputs, and ownership for When database becomes justified.
+1119. Validate assumptions used by When database becomes justified before relying on them.
+1120. Handle missing, invalid, empty, or unexpected inputs in When database becomes justified explicitly.
+1121. Keep When database becomes justified reproducible and reviewable by another team member.
+1122. Do not add unnecessary infrastructure to solve a When database becomes justified requirement.
+1123. Record important limitations and failure modes for When database becomes justified.
+1124. Define a clear acceptance condition for When database becomes justified.
+1125. Confirm the owner responsible for When database becomes justified.
+1126. Confirm the dependency order for When database becomes justified.
+1127. Confirm the expected artifact or response produced by When database becomes justified.
+1128. Confirm the validation method used for When database becomes justified.
+1129. Confirm that When database becomes justified cannot silently alter raw organizer data.
+1130. Confirm that errors in When database becomes justified are observable during integration.
+1131. Confirm that When database becomes justified can be demonstrated within the hackathon time budget.
+1132. Confirm that When database becomes justified supports the Round 2 evidence story where relevant.
+1133. Confirm that When database becomes justified does not create unsupported causal claims.
+1134. Confirm that When database becomes justified is covered by the final release checklist.
+## 1135. Security
+1136. Define the purpose of the Security component before implementation.
+1137. Keep Security aligned with the organizer-data-driven career-intelligence objective.
+1138. Use actual inspected data and frozen contracts as the source for Security.
+1139. Document inputs, transformations, outputs, and ownership for Security.
+1140. Validate assumptions used by Security before relying on them.
+1141. Handle missing, invalid, empty, or unexpected inputs in Security explicitly.
+1142. Keep Security reproducible and reviewable by another team member.
+1143. Do not add unnecessary infrastructure to solve a Security requirement.
+1144. Record important limitations and failure modes for Security.
+1145. Define a clear acceptance condition for Security.
+1146. Confirm the owner responsible for Security.
+1147. Confirm the dependency order for Security.
+1148. Confirm the expected artifact or response produced by Security.
+1149. Confirm the validation method used for Security.
+1150. Confirm that Security cannot silently alter raw organizer data.
+1151. Confirm that errors in Security are observable during integration.
+1152. Confirm that Security can be demonstrated within the hackathon time budget.
+1153. Confirm that Security supports the Round 2 evidence story where relevant.
+1154. Confirm that Security does not create unsupported causal claims.
+1155. Confirm that Security is covered by the final release checklist.
+## 1156. Organizer constraints
+1157. Define the purpose of the Organizer constraints component before implementation.
+1158. Keep Organizer constraints aligned with the organizer-data-driven career-intelligence objective.
+1159. Use actual inspected data and frozen contracts as the source for Organizer constraints.
+1160. Document inputs, transformations, outputs, and ownership for Organizer constraints.
+1161. Validate assumptions used by Organizer constraints before relying on them.
+1162. Handle missing, invalid, empty, or unexpected inputs in Organizer constraints explicitly.
+1163. Keep Organizer constraints reproducible and reviewable by another team member.
+1164. Do not add unnecessary infrastructure to solve a Organizer constraints requirement.
+1165. Record important limitations and failure modes for Organizer constraints.
+1166. Define a clear acceptance condition for Organizer constraints.
+1167. Confirm the owner responsible for Organizer constraints.
+1168. Confirm the dependency order for Organizer constraints.
+1169. Confirm the expected artifact or response produced by Organizer constraints.
+1170. Confirm the validation method used for Organizer constraints.
+1171. Confirm that Organizer constraints cannot silently alter raw organizer data.
+1172. Confirm that errors in Organizer constraints are observable during integration.
+1173. Confirm that Organizer constraints can be demonstrated within the hackathon time budget.
+1174. Confirm that Organizer constraints supports the Round 2 evidence story where relevant.
+1175. Confirm that Organizer constraints does not create unsupported causal claims.
+1176. Confirm that Organizer constraints is covered by the final release checklist.
+## 1177. Testing
+1178. Define the purpose of the Testing component before implementation.
+1179. Keep Testing aligned with the organizer-data-driven career-intelligence objective.
+1180. Use actual inspected data and frozen contracts as the source for Testing.
+1181. Document inputs, transformations, outputs, and ownership for Testing.
+1182. Validate assumptions used by Testing before relying on them.
+1183. Handle missing, invalid, empty, or unexpected inputs in Testing explicitly.
+1184. Keep Testing reproducible and reviewable by another team member.
+1185. Do not add unnecessary infrastructure to solve a Testing requirement.
+1186. Record important limitations and failure modes for Testing.
+1187. Define a clear acceptance condition for Testing.
+1188. Confirm the owner responsible for Testing.
+1189. Confirm the dependency order for Testing.
+1190. Confirm the expected artifact or response produced by Testing.
+1191. Confirm the validation method used for Testing.
+1192. Confirm that Testing cannot silently alter raw organizer data.
+1193. Confirm that errors in Testing are observable during integration.
+1194. Confirm that Testing can be demonstrated within the hackathon time budget.
+1195. Confirm that Testing supports the Round 2 evidence story where relevant.
+1196. Confirm that Testing does not create unsupported causal claims.
+1197. Confirm that Testing is covered by the final release checklist.
+## 1198. Data tests
+1199. Define the purpose of the Data tests component before implementation.
+1200. Keep Data tests aligned with the organizer-data-driven career-intelligence objective.
+1201. Use actual inspected data and frozen contracts as the source for Data tests.
+1202. Document inputs, transformations, outputs, and ownership for Data tests.
+1203. Validate assumptions used by Data tests before relying on them.
+1204. Handle missing, invalid, empty, or unexpected inputs in Data tests explicitly.
+1205. Keep Data tests reproducible and reviewable by another team member.
+1206. Do not add unnecessary infrastructure to solve a Data tests requirement.
+1207. Record important limitations and failure modes for Data tests.
+1208. Define a clear acceptance condition for Data tests.
+1209. Confirm the owner responsible for Data tests.
+1210. Confirm the dependency order for Data tests.
+1211. Confirm the expected artifact or response produced by Data tests.
+1212. Confirm the validation method used for Data tests.
+1213. Confirm that Data tests cannot silently alter raw organizer data.
+1214. Confirm that errors in Data tests are observable during integration.
+1215. Confirm that Data tests can be demonstrated within the hackathon time budget.
+1216. Confirm that Data tests supports the Round 2 evidence story where relevant.
+1217. Confirm that Data tests does not create unsupported causal claims.
+1218. Confirm that Data tests is covered by the final release checklist.
+## 1219. Pipeline tests
+1220. Define the purpose of the Pipeline tests component before implementation.
+1221. Keep Pipeline tests aligned with the organizer-data-driven career-intelligence objective.
+1222. Use actual inspected data and frozen contracts as the source for Pipeline tests.
+1223. Document inputs, transformations, outputs, and ownership for Pipeline tests.
+1224. Validate assumptions used by Pipeline tests before relying on them.
+1225. Handle missing, invalid, empty, or unexpected inputs in Pipeline tests explicitly.
+1226. Keep Pipeline tests reproducible and reviewable by another team member.
+1227. Do not add unnecessary infrastructure to solve a Pipeline tests requirement.
+1228. Record important limitations and failure modes for Pipeline tests.
+1229. Define a clear acceptance condition for Pipeline tests.
+1230. Confirm the owner responsible for Pipeline tests.
+1231. Confirm the dependency order for Pipeline tests.
+1232. Confirm the expected artifact or response produced by Pipeline tests.
+1233. Confirm the validation method used for Pipeline tests.
+1234. Confirm that Pipeline tests cannot silently alter raw organizer data.
+1235. Confirm that errors in Pipeline tests are observable during integration.
+1236. Confirm that Pipeline tests can be demonstrated within the hackathon time budget.
+1237. Confirm that Pipeline tests supports the Round 2 evidence story where relevant.
+1238. Confirm that Pipeline tests does not create unsupported causal claims.
+1239. Confirm that Pipeline tests is covered by the final release checklist.
+## 1240. 15-hour plan
+1241. Define the purpose of the 15-hour plan component before implementation.
+1242. Keep 15-hour plan aligned with the organizer-data-driven career-intelligence objective.
+1243. Use actual inspected data and frozen contracts as the source for 15-hour plan.
+1244. Document inputs, transformations, outputs, and ownership for 15-hour plan.
+1245. Validate assumptions used by 15-hour plan before relying on them.
+1246. Handle missing, invalid, empty, or unexpected inputs in 15-hour plan explicitly.
+1247. Keep 15-hour plan reproducible and reviewable by another team member.
+1248. Do not add unnecessary infrastructure to solve a 15-hour plan requirement.
+1249. Record important limitations and failure modes for 15-hour plan.
+1250. Define a clear acceptance condition for 15-hour plan.
+1251. Confirm the owner responsible for 15-hour plan.
+1252. Confirm the dependency order for 15-hour plan.
+1253. Confirm the expected artifact or response produced by 15-hour plan.
+1254. Confirm the validation method used for 15-hour plan.
+1255. Confirm that 15-hour plan cannot silently alter raw organizer data.
+1256. Confirm that errors in 15-hour plan are observable during integration.
+1257. Confirm that 15-hour plan can be demonstrated within the hackathon time budget.
+1258. Confirm that 15-hour plan supports the Round 2 evidence story where relevant.
+1259. Confirm that 15-hour plan does not create unsupported causal claims.
+1260. Confirm that 15-hour plan is covered by the final release checklist.
+## 1261. P0
+1262. Define the purpose of the P0 component before implementation.
+1263. Keep P0 aligned with the organizer-data-driven career-intelligence objective.
+1264. Use actual inspected data and frozen contracts as the source for P0.
+1265. Document inputs, transformations, outputs, and ownership for P0.
+1266. Validate assumptions used by P0 before relying on them.
+1267. Handle missing, invalid, empty, or unexpected inputs in P0 explicitly.
+1268. Keep P0 reproducible and reviewable by another team member.
+1269. Do not add unnecessary infrastructure to solve a P0 requirement.
+1270. Record important limitations and failure modes for P0.
+1271. Define a clear acceptance condition for P0.
+1272. Confirm the owner responsible for P0.
+1273. Confirm the dependency order for P0.
+1274. Confirm the expected artifact or response produced by P0.
+1275. Confirm the validation method used for P0.
+1276. Confirm that P0 cannot silently alter raw organizer data.
+1277. Confirm that errors in P0 are observable during integration.
+1278. Confirm that P0 can be demonstrated within the hackathon time budget.
+1279. Confirm that P0 supports the Round 2 evidence story where relevant.
+1280. Confirm that P0 does not create unsupported causal claims.
+1281. Confirm that P0 is covered by the final release checklist.
+## 1282. P1
+1283. Define the purpose of the P1 component before implementation.
+1284. Keep P1 aligned with the organizer-data-driven career-intelligence objective.
+1285. Use actual inspected data and frozen contracts as the source for P1.
+1286. Document inputs, transformations, outputs, and ownership for P1.
+1287. Validate assumptions used by P1 before relying on them.
+1288. Handle missing, invalid, empty, or unexpected inputs in P1 explicitly.
+1289. Keep P1 reproducible and reviewable by another team member.
+1290. Do not add unnecessary infrastructure to solve a P1 requirement.
+1291. Record important limitations and failure modes for P1.
+1292. Define a clear acceptance condition for P1.
+1293. Confirm the owner responsible for P1.
+1294. Confirm the dependency order for P1.
+1295. Confirm the expected artifact or response produced by P1.
+1296. Confirm the validation method used for P1.
+1297. Confirm that P1 cannot silently alter raw organizer data.
+1298. Confirm that errors in P1 are observable during integration.
+1299. Confirm that P1 can be demonstrated within the hackathon time budget.
+1300. Confirm that P1 supports the Round 2 evidence story where relevant.
+1301. Confirm that P1 does not create unsupported causal claims.
+1302. Confirm that P1 is covered by the final release checklist.
+## 1303. P2
+1304. Define the purpose of the P2 component before implementation.
+1305. Keep P2 aligned with the organizer-data-driven career-intelligence objective.
+1306. Use actual inspected data and frozen contracts as the source for P2.
+1307. Document inputs, transformations, outputs, and ownership for P2.
+1308. Validate assumptions used by P2 before relying on them.
+1309. Handle missing, invalid, empty, or unexpected inputs in P2 explicitly.
+1310. Keep P2 reproducible and reviewable by another team member.
+1311. Do not add unnecessary infrastructure to solve a P2 requirement.
+1312. Record important limitations and failure modes for P2.
+1313. Define a clear acceptance condition for P2.
+1314. Confirm the owner responsible for P2.
+1315. Confirm the dependency order for P2.
+1316. Confirm the expected artifact or response produced by P2.
+1317. Confirm the validation method used for P2.
+1318. Confirm that P2 cannot silently alter raw organizer data.
+1319. Confirm that errors in P2 are observable during integration.
+1320. Confirm that P2 can be demonstrated within the hackathon time budget.
+1321. Confirm that P2 supports the Round 2 evidence story where relevant.
+1322. Confirm that P2 does not create unsupported causal claims.
+1323. Confirm that P2 is covered by the final release checklist.
+## 1324. Handoff to analytics
+1325. Define the purpose of the Handoff to analytics component before implementation.
+1326. Keep Handoff to analytics aligned with the organizer-data-driven career-intelligence objective.
+1327. Use actual inspected data and frozen contracts as the source for Handoff to analytics.
+1328. Document inputs, transformations, outputs, and ownership for Handoff to analytics.
+1329. Validate assumptions used by Handoff to analytics before relying on them.
+1330. Handle missing, invalid, empty, or unexpected inputs in Handoff to analytics explicitly.
+1331. Keep Handoff to analytics reproducible and reviewable by another team member.
+1332. Do not add unnecessary infrastructure to solve a Handoff to analytics requirement.
+1333. Record important limitations and failure modes for Handoff to analytics.
+1334. Define a clear acceptance condition for Handoff to analytics.
+1335. Confirm the owner responsible for Handoff to analytics.
+1336. Confirm the dependency order for Handoff to analytics.
+1337. Confirm the expected artifact or response produced by Handoff to analytics.
+1338. Confirm the validation method used for Handoff to analytics.
+1339. Confirm that Handoff to analytics cannot silently alter raw organizer data.
+1340. Confirm that errors in Handoff to analytics are observable during integration.
+1341. Confirm that Handoff to analytics can be demonstrated within the hackathon time budget.
+1342. Confirm that Handoff to analytics supports the Round 2 evidence story where relevant.
+1343. Confirm that Handoff to analytics does not create unsupported causal claims.
+1344. Confirm that Handoff to analytics is covered by the final release checklist.
+## 1345. Handoff to API
+1346. Define the purpose of the Handoff to API component before implementation.
+1347. Keep Handoff to API aligned with the organizer-data-driven career-intelligence objective.
+1348. Use actual inspected data and frozen contracts as the source for Handoff to API.
+1349. Document inputs, transformations, outputs, and ownership for Handoff to API.
+1350. Validate assumptions used by Handoff to API before relying on them.
+1351. Handle missing, invalid, empty, or unexpected inputs in Handoff to API explicitly.
+1352. Keep Handoff to API reproducible and reviewable by another team member.
+1353. Do not add unnecessary infrastructure to solve a Handoff to API requirement.
+1354. Record important limitations and failure modes for Handoff to API.
+1355. Define a clear acceptance condition for Handoff to API.
+1356. Confirm the owner responsible for Handoff to API.
+1357. Confirm the dependency order for Handoff to API.
+1358. Confirm the expected artifact or response produced by Handoff to API.
+1359. Confirm the validation method used for Handoff to API.
+1360. Confirm that Handoff to API cannot silently alter raw organizer data.
+1361. Confirm that errors in Handoff to API are observable during integration.
+1362. Confirm that Handoff to API can be demonstrated within the hackathon time budget.
+1363. Confirm that Handoff to API supports the Round 2 evidence story where relevant.
+1364. Confirm that Handoff to API does not create unsupported causal claims.
+1365. Confirm that Handoff to API is covered by the final release checklist.
+## 1366. Acceptance
+1367. Define the purpose of the Acceptance component before implementation.
+1368. Keep Acceptance aligned with the organizer-data-driven career-intelligence objective.
+1369. Use actual inspected data and frozen contracts as the source for Acceptance.
+1370. Document inputs, transformations, outputs, and ownership for Acceptance.
+1371. Validate assumptions used by Acceptance before relying on them.
+1372. Handle missing, invalid, empty, or unexpected inputs in Acceptance explicitly.
+1373. Keep Acceptance reproducible and reviewable by another team member.
+1374. Do not add unnecessary infrastructure to solve a Acceptance requirement.
+1375. Record important limitations and failure modes for Acceptance.
+1376. Define a clear acceptance condition for Acceptance.
+1377. Confirm the owner responsible for Acceptance.
+1378. Confirm the dependency order for Acceptance.
+1379. Confirm the expected artifact or response produced by Acceptance.
+1380. Confirm the validation method used for Acceptance.
+1381. Confirm that Acceptance cannot silently alter raw organizer data.
+1382. Confirm that errors in Acceptance are observable during integration.
+1383. Confirm that Acceptance can be demonstrated within the hackathon time budget.
+1384. Confirm that Acceptance supports the Round 2 evidence story where relevant.
+1385. Confirm that Acceptance does not create unsupported causal claims.
+1386. Confirm that Acceptance is covered by the final release checklist.
+## 1387. Review checklist
+1388. Define the purpose of the Review checklist component before implementation.
+1389. Keep Review checklist aligned with the organizer-data-driven career-intelligence objective.
+1390. Use actual inspected data and frozen contracts as the source for Review checklist.
+1391. Document inputs, transformations, outputs, and ownership for Review checklist.
+1392. Validate assumptions used by Review checklist before relying on them.
+1393. Handle missing, invalid, empty, or unexpected inputs in Review checklist explicitly.
+1394. Keep Review checklist reproducible and reviewable by another team member.
+1395. Do not add unnecessary infrastructure to solve a Review checklist requirement.
+1396. Record important limitations and failure modes for Review checklist.
+1397. Define a clear acceptance condition for Review checklist.
+1398. Confirm the owner responsible for Review checklist.
+1399. Confirm the dependency order for Review checklist.
+1400. Confirm the expected artifact or response produced by Review checklist.
+1401. Confirm the validation method used for Review checklist.
+1402. Confirm that Review checklist cannot silently alter raw organizer data.
+1403. Confirm that errors in Review checklist are observable during integration.
+1404. Confirm that Review checklist can be demonstrated within the hackathon time budget.
+1405. Confirm that Review checklist supports the Round 2 evidence story where relevant.
+1406. Confirm that Review checklist does not create unsupported causal claims.
+1407. Confirm that Review checklist is covered by the final release checklist.
+## 1408. Final data release
+1409. Define the purpose of the Final data release component before implementation.
+1410. Keep Final data release aligned with the organizer-data-driven career-intelligence objective.
+1411. Use actual inspected data and frozen contracts as the source for Final data release.
+1412. Document inputs, transformations, outputs, and ownership for Final data release.
+1413. Validate assumptions used by Final data release before relying on them.
+1414. Handle missing, invalid, empty, or unexpected inputs in Final data release explicitly.
+1415. Keep Final data release reproducible and reviewable by another team member.
+1416. Do not add unnecessary infrastructure to solve a Final data release requirement.
+1417. Record important limitations and failure modes for Final data release.
+1418. Define a clear acceptance condition for Final data release.
+1419. Confirm the owner responsible for Final data release.
+1420. Confirm the dependency order for Final data release.
+1421. Confirm the expected artifact or response produced by Final data release.
+1422. Confirm the validation method used for Final data release.
+1423. Confirm that Final data release cannot silently alter raw organizer data.
+1424. Confirm that errors in Final data release are observable during integration.
+1425. Confirm that Final data release can be demonstrated within the hackathon time budget.
+1426. Confirm that Final data release supports the Round 2 evidence story where relevant.
+1427. Confirm that Final data release does not create unsupported causal claims.
+1428. Confirm that Final data release is covered by the final release checklist.
+## FINAL OPERATING RULES
+1429. Do not change architecture merely for novelty.
+1430. Do not introduce a database unless persistent application state is genuinely required.
+1431. Do not build a resume parser because the organizer datasets do not require one for the core analytics objective.
+1432. Do not add RAG unless a specific grounded narrative requirement is identified after the core analytics works.
+1433. Do not use embeddings as a substitute for basic statistical analysis.
+1434. Do not select models before understanding the target and sample size.
+1435. Do not hide data-quality problems.
+1436. Do not delete outliers without documenting the reason.
+1437. Do not treat correlation as causation.
+1438. Do not treat model feature importance as causal effect.
+1439. Do not report accuracy alone for an imbalanced classification task.
+1440. Do not fabricate dashboard metrics.
+1441. Do not hard-code secrets.
+1442. Do not move organizer data outside the allowed environment.
+1443. Do not commit restricted datasets if the organizer rules prohibit it.
+1444. Do not let frontend polish replace analytical substance.
+1445. Do not let backend infrastructure replace analytical evidence.
+1446. Do not let ML complexity replace clear interpretation.
+1447. Do not leave the problem statement vague.
+1448. Do not finish without a clear conclusion and implication.
+1449. Do not postpone integration until the final hour.
+1450. Do not create unnecessary branches.
+1451. Do not force-push protected main.
+1452. Do not merge code that has not been minimally tested.
+1453. Do not make a recommendation without evidence.
+1454. Do not present small-sample results as universally generalizable.
+1455. Do not ignore organizer-provided data dictionaries.
+1456. Do not assume the source description is more precise than the actual files.
+1457. Do not silently rename source columns without recording the mapping.
+1458. Do not lose traceability between raw and processed data.
+1459. Do not make the demo dependent on hidden manual steps.
+1460. Do not use Excel as the primary analytical environment when a reproducible code pipeline is available.
+1461. Do not forget the Round 2 report requirement.
+1462. Do not forget the Round 3 presentation requirement.
+1463. Do not forget jury Q&A preparation.
+1464. Freeze P0 features before polishing P1 features.
+1465. Keep a working build at every major checkpoint.
+1466. Use integration checkpoints after each major workstream.
+1467. Keep a fallback view for unavailable model/API components.
+1468. Use source-aware wording in all public-facing conclusions.
+
+## DEFINITION OF DONE
+The implementation is complete only when the source data, analytical pipeline, API, dashboard, evidence trail, tests, report, and presentation story are coherent.
