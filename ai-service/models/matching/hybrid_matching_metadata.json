@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "model_type": "Hybrid Matcher v1 (Heuristic)",
+  "weights": {
+    "skill_overlap": 0.5,
+    "tfidf_similarity": 0.2,
+    "semantic_similarity": 0.3
+  },
+  "formula": "0.50 * Skill Overlap + 0.20 * TF-IDF Similarity + 0.30 * Semantic Similarity",
+  "rationale": "Explicit required skills get the highest weight (50%) to ensure transparent explainability. Semantic embeddings (30%) capture meaning and synonyms across titles and project summaries. TF-IDF (20%) grounds recommendations in exact technical vocabulary. JDS and SDS predictions are strictly excluded.",
+  "created_at": "2026-10-07T13:45:14.332391+00:00"
+}

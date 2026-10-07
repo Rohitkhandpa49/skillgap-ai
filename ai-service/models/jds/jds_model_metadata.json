@@ -1,0 +1,121 @@
+{
+  "model_name": "Logistic Regression",
+  "model_type": "LogisticRegression",
+  "model_version": "1.0.0",
+  "dataset_name": "JDS Skill Traits.xlsx",
+  "target_column": "salary_hike_high_or_low",
+  "expected_features": [
+    "big_data_skills",
+    "maths-stats_skills",
+    "coding_skills",
+    "ai_and_ml_skills",
+    "dashboard_and_storytelling_skills"
+  ],
+  "trained_timestamp_utc": "2026-10-07T10:20:08.770102+00:00",
+  "random_state": 42,
+  "features_scaled": true,
+  "preprocessing_artifacts": {
+    "scaler": "models/preprocessing/jds_standard_scaler.joblib"
+  },
+  "cross_validation_metrics": {
+    "Logistic Regression": {
+      "accuracy": {
+        "mean": 0.8458498023715414,
+        "std": 0.09405952032321487
+      },
+      "precision": {
+        "mean": 0.8351648351648352,
+        "std": 0.10789395787809737
+      },
+      "recall": {
+        "mean": 0.8969696969696971,
+        "std": 0.061657545301138796
+      },
+      "f1": {
+        "mean": 0.8629890109890109,
+        "std": 0.07879052455073339
+      }
+    },
+    "Random Forest": {
+      "accuracy": {
+        "mean": 0.7924901185770752,
+        "std": 0.03766364980101691
+      },
+      "precision": {
+        "mean": 0.840989010989011,
+        "std": 0.09513183703208607
+      },
+      "recall": {
+        "mean": 0.7742424242424242,
+        "std": 0.1356377988929398
+      },
+      "f1": {
+        "mean": 0.790710270122035,
+        "std": 0.05384886854923172
+      }
+    },
+    "SVM (RBF)": {
+      "accuracy": {
+        "mean": 0.8280632411067194,
+        "std": 0.061385829749619515
+      },
+      "precision": {
+        "mean": 0.8371794871794872,
+        "std": 0.10506884004951828
+      },
+      "recall": {
+        "mean": 0.8606060606060606,
+        "std": 0.07369931216372913
+      },
+      "f1": {
+        "mean": 0.8414979757085019,
+        "std": 0.04682219248438444
+      }
+    }
+  },
+  "held_out_test_metrics": {
+    "accuracy": 0.8928571428571429,
+    "precision": 0.875,
+    "recall": 0.9333333333333333,
+    "f1": 0.9032258064516129
+  },
+  "confusion_matrix": [
+    [
+      11,
+      2
+    ],
+    [
+      1,
+      14
+    ]
+  ],
+  "feature_importance_or_weights": [
+    {
+      "feature": "maths-stats_skills",
+      "weight": 1.228196196909222
+    },
+    {
+      "feature": "dashboard_and_storytelling_skills",
+      "weight": 0.8557533140222541
+    },
+    {
+      "feature": "ai_and_ml_skills",
+      "weight": 0.7843831566252794
+    },
+    {
+      "feature": "big_data_skills",
+      "weight": 0.6282255253860495
+    },
+    {
+      "feature": "coding_skills",
+      "weight": 0.47797537183538175
+    }
+  ],
+  "data_leakage_checks": {
+    "scaler_fitted_only_on_train": true,
+    "target_not_in_features": true,
+    "id_not_in_features": true,
+    "train_test_no_overlap": true,
+    "test_set_unseen_during_model_selection": true
+  }
+}

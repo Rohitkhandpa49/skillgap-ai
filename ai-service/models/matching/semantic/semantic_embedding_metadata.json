@@ -1,0 +1,19 @@
+{
+  "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+  "sentence_transformers_version": "6.1.0",
+  "torch_version": "2.14.1+cpu",
+  "transformers_version": "5.19.0",
+  "embedding_dimension": 384,
+  "job_count": 14840,
+  "normalize_embeddings": true,
+  "device": "cpu",
+  "generation_time_seconds": 171.38,
+  "text_fields_used": [
+    "job_title_normalized",
+    "skills",
+    "unknown_skills",
+    "job_description"
+  ],
+  "created_at": "2026-10-07T12:28:52.684793+00:00",
+  "notes": "Normalized L2 embeddings for exact dot-product cosine similarity. Excludes JDS salary-hike and SDS personality predictions to prevent algorithmic bias."
+}
